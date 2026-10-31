@@ -2,23 +2,28 @@
 // © Kizzy
 //
 // Kizzy – CRT Blueprint
-// Candle Range Theory (CRT) detector across up to 3 higher timeframes.
+// Candle Range Theory (CRT) detector across up to 3 higher timeframes, 6 CRT models:
 //
-//  C1 = range candle  → CRH (high) / CRL (low)
-//  C2 = sweep candle  → wicks beyond ONE side of C1 and closes back inside the range
-//  Bearish CRT : C2 sweeps CRH → TP1 = 50% of C1, TP2 = CRL
-//  Bullish CRT : C2 sweeps CRL → TP1 = 50% of C1, TP2 = CRH
-//  Invalidation: price trades beyond C2's sweep extreme before TP2.
+//  1 · Classic CRT        C1 = range. C2 sweeps ONE side and closes back inside (C1 opposite colour / reversal).
+//  2 · Two Candle CRT     C2 sweeps one side AND closes beyond the other side – range delivered in one candle.
+//  3 · Multiple Candle    Any setup that needs 2+ more HTF candles after the sweep to reach TP2 (tagged "MC").
+//  4 · Double Purge CRT   C2 sweeps one side, C3 sweeps the OTHER side, both close inside C1 → trade C3's reversal.
+//  5 · Inside Bar CRT     Mother bar + 1..N inside bars, then a candle sweeps the mother bar and closes inside.
+//  6 · Continuation CRT   Like Classic, but C1 has the same colour as the signal (sweep against trend, then continue).
+//
+//  Targets: TP1 = 50% of the range, TP2 = opposite side of the range.
+//  Invalidation: price trades beyond the sweep candle's extreme before TP2.
 //
 // Alerts: Create Alert → Condition "Kizzy CRT" → "Any alert() function call".
 
 //@version=6
-indicator("Kizzy – CRT Blueprint", shorttitle = "Kizzy CRT", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("Kizzy – CRT Blueprint", shorttitle = "Kizzy CRT", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 100)
 
 // ═════════════════════════════════════════════════════════════════════════════
 // INPUTS
 // ═════════════════════════════════════════════════════════════════════════════
 const string G_TF  = "Timeframes  (on / TF / line style)"
+const string G_TYP = "CRT Types"
 const string G_FLT = "CRT Filters"
 const string G_VIS = "Display"
 const string G_ALR = "Alerts"
@@ -35,15 +40,29 @@ bool   tf3On  = input.bool(true, "", inline = "3", group = G_TF)
 string tf3    = input.timeframe("240", "", inline = "3", group = G_TF)
 string tf3Sty = input.string("Dotted", "", ["Solid", "Dashed", "Dotted"], inline = "3", group = G_TF)
 
+bool useCL = input.bool(true, "1 · Classic CRT", group = G_TYP,
+     tooltip = "C1 = range. C2 sweeps one side of C1 and closes back inside. C1 colour is opposite to the trade (reversal).")
+bool use2C = input.bool(true, "2 · Two Candle CRT", group = G_TYP,
+     tooltip = "C2 sweeps one side of C1 and closes beyond the other side – the whole range is delivered by one candle. Shown as already completed (bias).")
+bool useMC = input.bool(true, "3 · Multiple Candle CRT (tag)", group = G_TYP,
+     tooltip = "A setup that reaches TP2 only after 2+ more HTF candles is tagged MC. Price stays inside the range while it builds.")
+bool useDP = input.bool(true, "4 · Double Purge CRT", group = G_TYP,
+     tooltip = "C2 sweeps one side of C1, C3 sweeps the other side; both close back inside C1. Trade the direction of C3's rejection.")
+bool useIB = input.bool(true, "5 · Inside Bar CRT", inline = "ib", group = G_TYP,
+     tooltip = "Mother bar followed by inside bar(s); then a candle sweeps the mother bar's high/low and closes back inside.")
+int  maxIB = input.int(3, "max inside bars", minval = 1, maxval = 5, inline = "ib", group = G_TYP)
+bool useCT = input.bool(true, "6 · Continuation CRT", group = G_TYP,
+     tooltip = "Like Classic but C1 has the SAME colour as the trade: e.g. bullish C1, C2 sweeps its low and closes inside → bullish continuation.")
+
 bool  qualityOnly = input.bool(true, "Quality CRT Only", group = G_FLT,
-     tooltip = "C2 must OPEN inside C1's range: only its wick sweeps the high/low, then it closes back inside.")
+     tooltip = "The sweep candle must OPEN inside the range: only its wick sweeps the high/low.")
 bool  oppColor    = input.bool(false, "Opposite-Color Child Only", group = G_FLT,
-     tooltip = "Bearish CRT: C1 green + C2 red.  Bullish CRT: C1 red + C2 green.")
+     tooltip = "Range candle and sweep candle must have opposite colours. (Turns off Continuation CRT.)")
 float maxWick     = input.float(100, "Max Wick % (vs Body)", minval = 0, step = 10, group = G_FLT,
-     tooltip = "C1's total wick length must be ≤ this % of its body (a decisive range candle). 0 = off.")
+     tooltip = "The range candle's total wick length must be ≤ this % of its body (a decisive range candle). 0 = off.")
 bool  showTP      = input.bool(true, "Show TP Levels (50%, Target)", group = G_FLT)
 bool  showUnconf  = input.bool(true, "Show unconfirmed (forming) CRT in dashboard", group = G_FLT,
-     tooltip = "Checks the still-open HTF candle against the last closed one. It can change until that candle closes – no alerts are sent for it.")
+     tooltip = "Checks the still-open HTF candle against the last closed one (Classic rule). It can change until that candle closes – no alerts are sent for it.")
 
 color bullCol  = input.color(#089981, "Bull", inline = "c", group = G_VIS)
 color bearCol  = input.color(#F23645, "Bear", inline = "c", group = G_VIS)
@@ -73,6 +92,31 @@ string dashSize = input.string("Small", "Size", ["Tiny", "Small", "Normal"], gro
 // ═════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═════════════════════════════════════════════════════════════════════════════
+// CRT kinds
+const int K_CL = 1
+const int K_2C = 2
+const int K_DP = 3
+const int K_IB = 4
+const int K_CT = 5
+
+f_name(int k) =>
+    switch k
+        K_CL => "Classic"
+        K_2C => "Two Candle"
+        K_DP => "Double Purge"
+        K_IB => "Inside Bar"
+        K_CT => "Continuation"
+        => ""
+
+f_code(int k) =>
+    switch k
+        K_CL => "CL"
+        K_2C => "2C"
+        K_DP => "DP"
+        K_IB => "IB"
+        K_CT => "CT"
+        => ""
+
 f_style(string s) =>
     s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
 
@@ -96,7 +140,12 @@ f_size(string s) =>
         "Normal" => size.normal
         => size.small
 
-// Core CRT rule. Returns [bearish, bullish] for range candle (1) and sweep candle (2).
+// Range candle is "decisive": total wick ≤ maxWick % of body.
+f_rangeOk(float o, float h, float l, float c) =>
+    float body = math.abs(c - o)
+    maxWick <= 0 or (body > 0 and (h - l) - body <= body * maxWick / 100)
+
+// Sweep-and-close-back-inside rule. Range candle (1) vs sweep candle (2). Returns [bearish, bullish].
 f_detect(float o1, float h1, float l1, float c1, float o2, float h2, float l2, float c2) =>
     bool sweptH = h2 > h1
     bool sweptL = l2 < l1
@@ -110,14 +159,98 @@ f_detect(float o1, float h1, float l1, float c1, float o2, float h2, float l2, f
     if oppColor
         bear := bear and c1 > o1 and c2 < o2
         bull := bull and c1 < o1 and c2 > o2
-    float body1  = math.abs(c1 - o1)
-    float wick1  = (h1 - l1) - body1
-    bool  wickOk = maxWick <= 0 or (body1 > 0 and wick1 <= body1 * maxWick / 100)
-    [bear and wickOk, bull and wickOk]
+    bool ok = f_rangeOk(o1, h1, l1, c1)
+    [bear and ok, bull and ok]
 
-// Last two CLOSED higher-timeframe candles (non-repainting: offset + lookahead_on).
+// Runs ON THE HIGHER TIMEFRAME. The current HTF bar is the candidate sweep candle.
+// Returns [kind, dir, rangeHigh, rangeLow, invalidation, rangeTime].
+f_classify() =>
+    int   kind = 0
+    int   dir  = 0
+    float rh   = na
+    float rl   = na
+    float iv   = na
+    int   tr   = na
+
+    // 4 · Double Purge – range = [2], [1] purges one side, current bar purges the other side
+    if useDP
+        float h0   = high[2]
+        float l0   = low[2]
+        bool  c1In = close[1] < h0 and close[1] > l0
+        bool  c0In = close < h0 and close > l0
+        bool  p1Hi = high[1] > h0 and low[1] >= l0 and c1In
+        bool  p1Lo = low[1] < l0 and high[1] <= h0 and c1In
+        bool  p0Hi = high > h0 and low >= l0 and c0In
+        bool  p0Lo = low < l0 and high <= h0 and c0In
+        if f_rangeOk(open[2], h0, l0, close[2]) and ((p1Hi and p0Lo) or (p1Lo and p0Hi))
+            kind := K_DP
+            dir  := p0Lo ? 1 : -1
+            rh   := h0
+            rl   := l0
+            iv   := p0Lo ? low : high
+            tr   := time[2]
+
+    // 5 · Inside Bar – mother bar [k] with bars [1..k-1] inside it, current bar sweeps the mother
+    if kind == 0 and useIB
+        for k = 2 to maxIB + 1
+            float mh    = high[k]
+            float ml    = low[k]
+            bool  allIn = true
+            for j = 1 to k - 1
+                if high[j] > mh or low[j] < ml
+                    allIn := false
+                    break
+            if allIn
+                [bear, bull] = f_detect(open[k], mh, ml, close[k], open, high, low, close)
+                if bear or bull
+                    kind := K_IB
+                    dir  := bull ? 1 : -1
+                    rh   := mh
+                    rl   := ml
+                    iv   := bull ? low : high
+                    tr   := time[k]
+                break
+
+    // 1 · Classic  /  6 · Continuation – range = [1]
+    if kind == 0 and (useCL or useCT)
+        [bear, bull] = f_detect(open[1], high[1], low[1], close[1], open, high, low, close)
+        if bear or bull
+            int  d    = bull ? 1 : -1
+            bool cont = (d == 1 and close[1] > open[1]) or (d == -1 and close[1] < open[1])
+            int  k2   = cont ? K_CT : K_CL
+            if (k2 == K_CL and useCL) or (k2 == K_CT and useCT)
+                kind := k2
+                dir  := d
+                rh   := high[1]
+                rl   := low[1]
+                iv   := bull ? low : high
+                tr   := time[1]
+
+    // 2 · Two Candle – sweep one side and close beyond the other side of [1]
+    if kind == 0 and use2C
+        float h1     = high[1]
+        float l1     = low[1]
+        bool  openIn = not qualityOnly or (open <= h1 and open >= l1)
+        bool  bull   = low < l1 and close > h1
+        bool  bear   = high > h1 and close < l1
+        if openIn and f_rangeOk(open[1], h1, l1, close[1]) and (bull or bear)
+            kind := K_2C
+            dir  := bull ? 1 : -1
+            rh   := h1
+            rl   := l1
+            iv   := bull ? low : high
+            tr   := time[1]
+
+    [kind, dir, rh, rl, iv, tr]
+
+// Classification of the last CLOSED HTF candle (non-repainting: [1] + lookahead_on).
+f_htf() =>
+    [k, d, rh, rl, iv, tr] = f_classify()
+    [k[1], d[1], rh[1], rl[1], iv[1], tr[1]]
+
+// Last two CLOSED HTF candles, for the mini candles and the live check.
 f_pair() =>
-    [time[2], open[2], high[2], low[2], close[2], open[1], high[1], low[1], close[1]]
+    [open[2], high[2], low[2], close[2], open[1], high[1], low[1], close[1]]
 
 // ═════════════════════════════════════════════════════════════════════════════
 // CRT STATE
@@ -126,6 +259,7 @@ type Crt
     string tf
     string lbl
     string sty
+    int    kind   = 0
     int    dir    = 0
     float  crh
     float  crl
@@ -134,7 +268,9 @@ type Crt
     float  inval
     bool   tp1Hit = false
     bool   done   = false
-    string status = "Waiting"
+    int    result = 0     // 1 = TP2 reached, -1 = invalidated
+    int    age    = 0     // HTF candles since confirmation
+    bool   multi  = false
     float  c3o
     float  c3h
     float  c3l
@@ -159,31 +295,54 @@ method freeze(Crt s) =>
             l.set_extend(extend.none)
             l.set_x2(time)
 
-method start(Crt s, int dir, float h1, float l1, float h2, float l2, int t1) =>
+method statusText(Crt s) =>
+    string base = f_name(s.kind) + (s.dir == 1 ? " ▲" : " ▼")
+    string r = ""
+    if s.dir == 0
+        r := "Waiting"
+    else if s.result == 1
+        r := base + (s.multi ? " · MC" : "") + " · TP2 ✓"
+    else if s.result == -1
+        r := base + (s.tp1Hit ? " · TP1 ✓ / stop" : " · ✗")
+    else
+        r := base + (s.tp1Hit ? " · TP1 ✓" : "") + (s.age > 0 ? " · +" + str.tostring(s.age) : "")
+    r
+
+method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr) =>
     if keepHist
         s.freeze()
     else
         s.clearDraw()
+    s.kind   := kind
     s.dir    := dir
-    s.crh    := h1
-    s.crl    := l1
-    s.tp1    := (h1 + l1) / 2
-    s.tp2    := dir == -1 ? l1 : h1
-    s.inval  := dir == -1 ? h2 : l2
+    s.crh    := rh
+    s.crl    := rl
+    s.tp1    := (rh + rl) / 2
+    s.tp2    := dir == -1 ? rl : rh
+    s.inval  := iv
     s.tp1Hit := false
     s.done   := false
-    s.status := dir == -1 ? "Bear CRT ▼" : "Bull CRT ▲"
-    string st = f_style(s.sty)
-    color  dc = dir == 1 ? bullCol : bearCol
-    string hTxt = "CRH " + s.lbl + (dir == -1 ? " ▼" : "") + (showTP and dir == 1 ? " | TP2" : "")
-    string lTxt = "CRL " + s.lbl + (dir == 1 ? " ▲" : "") + (showTP and dir == -1 ? " | TP2" : "")
-    s.lH := line.new(t1, h1, time, h1, xloc.bar_time, extend.right, dir == -1 ? dc : lvlCol, st, 1)
-    s.lL := line.new(t1, l1, time, l1, xloc.bar_time, extend.right, dir == 1 ? dc : lvlCol, st, 1)
-    s.bH := label.new(time, h1, hTxt, xloc.bar_time, yloc.price, color(na), label.style_label_left, dir == -1 ? dc : lvlCol, size.small)
-    s.bL := label.new(time, l1, lTxt, xloc.bar_time, yloc.price, color(na), label.style_label_left, dir == 1 ? dc : lvlCol, size.small)
+    s.result := 0
+    s.age    := 0
+    s.multi  := false
+    string st  = f_style(s.sty)
+    color  dc  = dir == 1 ? bullCol : bearCol
+    string tag = " " + f_code(kind)
+    string hTxt = "CRH " + s.lbl + (dir == -1 ? " ▼" + tag : "") + (showTP and dir == 1 ? " | TP2" : "")
+    string lTxt = "CRL " + s.lbl + (dir == 1 ? " ▲" + tag : "") + (showTP and dir == -1 ? " | TP2" : "")
+    s.lH := line.new(tr, rh, time, rh, xloc.bar_time, extend.right, dir == -1 ? dc : lvlCol, st, 1)
+    s.lL := line.new(tr, rl, time, rl, xloc.bar_time, extend.right, dir == 1 ? dc : lvlCol, st, 1)
+    s.bH := label.new(time, rh, hTxt, xloc.bar_time, yloc.price, color(na), label.style_label_left, dir == -1 ? dc : lvlCol, size.small)
+    s.bL := label.new(time, rl, lTxt, xloc.bar_time, yloc.price, color(na), label.style_label_left, dir == 1 ? dc : lvlCol, size.small)
     if showTP
-        s.lT := line.new(t1, s.tp1, time, s.tp1, xloc.bar_time, extend.right, color.new(dc, 30), line.style_dashed, 1)
+        s.lT := line.new(tr, s.tp1, time, s.tp1, xloc.bar_time, extend.right, color.new(dc, 30), line.style_dashed, 1)
         s.bT := label.new(time, s.tp1, "TP1 " + s.lbl + " (50%)", xloc.bar_time, yloc.price, color(na), label.style_label_left, dc, size.small)
+    // Two Candle CRT: the range was already delivered by the sweep candle itself
+    if kind == K_2C
+        s.tp1Hit := true
+        s.done   := true
+        s.result := 1
+        s.freeze()
 
 // Follows an active CRT on every chart bar. Returns [tp1Hit, tp2Hit, invalidated] events.
 method track(Crt s) =>
@@ -197,17 +356,17 @@ method track(Crt s) =>
         if not s.tp1Hit and hitTp1
             s.tp1Hit := true
             e1 := true
-            s.status := "TP1 ✓"
             if not na(s.bT)
                 s.bT.set_text("TP1 " + s.lbl + " ✓")
         if hitTp2
-            s.done := true
+            s.done   := true
+            s.result := 1
+            s.multi  := useMC and s.age >= 1
             e2 := true
-            s.status := "TP2 ✓ done"
         else if broke
-            s.done := true
+            s.done   := true
+            s.result := -1
             ei := true
-            s.status := s.tp1Hit ? "TP1 ✓ / stopped" : "Invalidated ✗"
         if s.done
             s.freeze()
     [e1, e2, ei]
@@ -219,7 +378,7 @@ method moveLabels(Crt s, int x) =>
                 b.set_x(x)
 
 // One timeframe, one chart bar. `tf` is passed separately so it stays a simple string.
-f_step(Crt s, string tf, bool on, int t1, float o1, float h1, float l1, float c1, float o2, float h2, float l2, float c2) =>
+f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float iv, int tr) =>
     bool newHtf = timeframe.change(tf)
     // live (still open) HTF candle, built from chart bars
     if newHtf or na(s.c3o)
@@ -229,30 +388,30 @@ f_step(Crt s, string tf, bool on, int t1, float o1, float h1, float l1, float c1
     else
         s.c3h := math.max(s.c3h, high)
         s.c3l := math.min(s.c3l, low)
+    if newHtf and s.dir != 0 and not s.done
+        s.age += 1
     bool nBull = false
     bool nBear = false
-    if on and newHtf
-        [isBear, isBull] = f_detect(o1, h1, l1, c1, o2, h2, l2, c2)
-        if isBear
-            s.start(-1, h1, l1, h2, l2, t1)
-            nBear := true
-        else if isBull
-            s.start(1, h1, l1, h2, l2, t1)
-            nBull := true
+    if on and newHtf and kind != 0 and not na(rh)
+        s.start(kind, dir, rh, rl, iv, tr)
+        nBull := dir == 1
+        nBear := dir == -1
     [e1, e2, ei] = s.track()
     [nBull, nBear, e1, e2, ei]
 
 f_alert(Crt s, bool nBull, bool nBear, bool e1, bool e2, bool ei) =>
     string sym = syminfo.ticker
+    string nm  = f_name(s.kind)
+    string dr  = s.dir == 1 ? "BULL" : "BEAR"
     if alNew and (nBull or nBear)
-        alert(str.format("{0} | CRT {1} {2} | TP1 (50%): {3} | TP2: {4} | Invalid: {5}",
-             sym, s.lbl, nBull ? "BULL 🟢" : "BEAR 🔴", f_px(s.tp1), f_px(s.tp2), f_px(s.inval)), alert.freq_once_per_bar)
+        string extra = s.kind == K_2C ? " | range already delivered" : str.format(" | TP1 (50%): {0} | TP2: {1} | Invalid: {2}", f_px(s.tp1), f_px(s.tp2), f_px(s.inval))
+        alert(str.format("{0} | {1} CRT {2} {3}{4}", sym, s.lbl, nm, nBull ? "BULL 🟢" : "BEAR 🔴", extra), alert.freq_once_per_bar)
     if alTP1 and e1
-        alert(str.format("{0} | CRT {1} {2} | TP1 hit ✓ {3}", sym, s.lbl, s.dir == 1 ? "BULL" : "BEAR", f_px(s.tp1)), alert.freq_once_per_bar)
+        alert(str.format("{0} | {1} {2} CRT {3} | TP1 hit ✓ {4}", sym, s.lbl, nm, dr, f_px(s.tp1)), alert.freq_once_per_bar)
     if alTP2 and e2
-        alert(str.format("{0} | CRT {1} {2} | TP2 hit ✓ {3}", sym, s.lbl, s.dir == 1 ? "BULL" : "BEAR", f_px(s.tp2)), alert.freq_once_per_bar)
+        alert(str.format("{0} | {1} {2} CRT {3}{4} | TP2 hit ✓ {5}", sym, s.lbl, nm, dr, s.multi ? " (Multiple Candle)" : "", f_px(s.tp2)), alert.freq_once_per_bar)
     if alInv and ei
-        alert(str.format("{0} | CRT {1} {2} | invalidated beyond {3}", sym, s.lbl, s.dir == 1 ? "BULL" : "BEAR", f_px(s.inval)), alert.freq_once_per_bar)
+        alert(str.format("{0} | {1} {2} CRT {3} | invalidated beyond {4}", sym, s.lbl, nm, dr, f_px(s.inval)), alert.freq_once_per_bar)
 
 // ═════════════════════════════════════════════════════════════════════════════
 // DATA + ENGINE
@@ -262,17 +421,21 @@ bool on1 = tf1On and timeframe.in_seconds(tf1) >= chartSec
 bool on2 = tf2On and timeframe.in_seconds(tf2) >= chartSec
 bool on3 = tf3On and timeframe.in_seconds(tf3) >= chartSec
 
-[a_t1, a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2] = request.security(syminfo.tickerid, tf1, f_pair(), lookahead = barmerge.lookahead_on)
-[b_t1, b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2] = request.security(syminfo.tickerid, tf2, f_pair(), lookahead = barmerge.lookahead_on)
-[c_t1, c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2] = request.security(syminfo.tickerid, tf3, f_pair(), lookahead = barmerge.lookahead_on)
+[a_k, a_d, a_rh, a_rl, a_iv, a_tr] = request.security(syminfo.tickerid, tf1, f_htf(), lookahead = barmerge.lookahead_on)
+[b_k, b_d, b_rh, b_rl, b_iv, b_tr] = request.security(syminfo.tickerid, tf2, f_htf(), lookahead = barmerge.lookahead_on)
+[c_k, c_d, c_rh, c_rl, c_iv, c_tr] = request.security(syminfo.tickerid, tf3, f_htf(), lookahead = barmerge.lookahead_on)
+
+[a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2] = request.security(syminfo.tickerid, tf1, f_pair(), lookahead = barmerge.lookahead_on)
+[b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2] = request.security(syminfo.tickerid, tf2, f_pair(), lookahead = barmerge.lookahead_on)
+[c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2] = request.security(syminfo.tickerid, tf3, f_pair(), lookahead = barmerge.lookahead_on)
 
 var Crt s1 = Crt.new(tf1, f_tfLabel(tf1), tf1Sty)
 var Crt s2 = Crt.new(tf2, f_tfLabel(tf2), tf2Sty)
 var Crt s3 = Crt.new(tf3, f_tfLabel(tf3), tf3Sty)
 
-[n1u, n1d, e11, e12, e1i] = f_step(s1, tf1, on1, a_t1, a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2)
-[n2u, n2d, e21, e22, e2i] = f_step(s2, tf2, on2, b_t1, b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2)
-[n3u, n3d, e31, e32, e3i] = f_step(s3, tf3, on3, c_t1, c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2)
+[n1u, n1d, e11, e12, e1i] = f_step(s1, tf1, on1, a_k, a_d, a_rh, a_rl, a_iv, a_tr)
+[n2u, n2d, e21, e22, e2i] = f_step(s2, tf2, on2, b_k, b_d, b_rh, b_rl, b_iv, b_tr)
+[n3u, n3d, e31, e32, e3i] = f_step(s3, tf3, on3, c_k, c_d, c_rh, c_rl, c_iv, c_tr)
 
 f_alert(s1, n1u, n1d, e11, e12, e1i)
 f_alert(s2, n2u, n2d, e21, e22, e2i)
@@ -354,7 +517,7 @@ f_row(int row, Crt s, bool enabled, bool on, string forming) =>
     color  sc = s.dir == 1 ? bullCol : s.dir == -1 ? bearCol : #B2B5BE
     if s.done
         sc := color.new(sc, 40)
-    string st = not enabled ? "OFF" : not on ? "TF < chart" : s.status
+    string st = not enabled ? "OFF" : not on ? "TF < chart" : s.statusText()
     table.cell(dash, 0, row, s.lbl, text_color = color.white, text_size = ts, text_halign = text.align_left)
     table.cell(dash, 1, row, st, text_color = on ? sc : #787B86, text_size = ts, text_halign = text.align_left)
     table.cell(dash, 2, row, forming, text_color = str.contains(forming, "▲") ? bullCol : str.contains(forming, "▼") ? bearCol : #787B86, text_size = ts)
