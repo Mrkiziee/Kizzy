@@ -1,0 +1,369 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Kizzy
+//
+// Kizzy – CRT Blueprint
+// Candle Range Theory (CRT) detector across up to 3 higher timeframes.
+//
+//  C1 = range candle  → CRH (high) / CRL (low)
+//  C2 = sweep candle  → wicks beyond ONE side of C1 and closes back inside the range
+//  Bearish CRT : C2 sweeps CRH → TP1 = 50% of C1, TP2 = CRL
+//  Bullish CRT : C2 sweeps CRL → TP1 = 50% of C1, TP2 = CRH
+//  Invalidation: price trades beyond C2's sweep extreme before TP2.
+//
+// Alerts: Create Alert → Condition "Kizzy CRT" → "Any alert() function call".
+
+//@version=6
+indicator("Kizzy – CRT Blueprint", shorttitle = "Kizzy CRT", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═════════════════════════════════════════════════════════════════════════════
+const string G_TF  = "Timeframes  (on / TF / line style)"
+const string G_FLT = "CRT Filters"
+const string G_VIS = "Display"
+const string G_ALR = "Alerts"
+const string G_SES = "Sessions"
+const string G_DSH = "Dashboard"
+
+bool   tf1On  = input.bool(true, "", inline = "1", group = G_TF)
+string tf1    = input.timeframe("30", "", inline = "1", group = G_TF)
+string tf1Sty = input.string("Solid", "", ["Solid", "Dashed", "Dotted"], inline = "1", group = G_TF)
+bool   tf2On  = input.bool(true, "", inline = "2", group = G_TF)
+string tf2    = input.timeframe("60", "", inline = "2", group = G_TF)
+string tf2Sty = input.string("Dashed", "", ["Solid", "Dashed", "Dotted"], inline = "2", group = G_TF)
+bool   tf3On  = input.bool(true, "", inline = "3", group = G_TF)
+string tf3    = input.timeframe("240", "", inline = "3", group = G_TF)
+string tf3Sty = input.string("Dotted", "", ["Solid", "Dashed", "Dotted"], inline = "3", group = G_TF)
+
+bool  qualityOnly = input.bool(true, "Quality CRT Only", group = G_FLT,
+     tooltip = "C2 must OPEN inside C1's range: only its wick sweeps the high/low, then it closes back inside.")
+bool  oppColor    = input.bool(false, "Opposite-Color Child Only", group = G_FLT,
+     tooltip = "Bearish CRT: C1 green + C2 red.  Bullish CRT: C1 red + C2 green.")
+float maxWick     = input.float(100, "Max Wick % (vs Body)", minval = 0, step = 10, group = G_FLT,
+     tooltip = "C1's total wick length must be ≤ this % of its body (a decisive range candle). 0 = off.")
+bool  showTP      = input.bool(true, "Show TP Levels (50%, Target)", group = G_FLT)
+bool  showUnconf  = input.bool(true, "Show unconfirmed (forming) CRT in dashboard", group = G_FLT,
+     tooltip = "Checks the still-open HTF candle against the last closed one. It can change until that candle closes – no alerts are sent for it.")
+
+color bullCol  = input.color(#089981, "Bull", inline = "c", group = G_VIS)
+color bearCol  = input.color(#F23645, "Bear", inline = "c", group = G_VIS)
+color lvlCol   = input.color(#787B86, "Range", inline = "c", group = G_VIS)
+bool  keepHist = input.bool(false, "Keep past CRTs on chart", group = G_VIS)
+bool  showMini = input.bool(true, "Show HTF candles to the right", group = G_VIS)
+int   miniOff  = input.int(10, "HTF candles offset (bars)", minval = 4, maxval = 200, group = G_VIS)
+
+bool alNew = input.bool(true, "New CRT", inline = "a", group = G_ALR)
+bool alTP1 = input.bool(true, "TP1 hit", inline = "a", group = G_ALR)
+bool alTP2 = input.bool(true, "TP2 hit", inline = "a", group = G_ALR)
+bool alInv = input.bool(false, "Invalidated", inline = "a", group = G_ALR)
+
+bool   showSes = input.bool(true, "Show sessions (intraday ≤ 1H)", group = G_SES)
+string sesTz   = input.string("America/New_York", "Timezone", group = G_SES)
+string asiaS   = input.session("2000-0000", "Asia", inline = "s1", group = G_SES)
+color  asiaC   = input.color(color.new(#FFB74D, 92), "", inline = "s1", group = G_SES)
+string lonS    = input.session("0200-0500", "London", inline = "s2", group = G_SES)
+color  lonC    = input.color(color.new(#7E57C2, 92), "", inline = "s2", group = G_SES)
+string nyS     = input.session("0930-1130", "New York", inline = "s3", group = G_SES)
+color  nyC     = input.color(color.new(#26A69A, 92), "", inline = "s3", group = G_SES)
+
+bool   showDash = input.bool(true, "Show dashboard", group = G_DSH)
+string dashPos  = input.string("Bottom Right", "Position", ["Top Right", "Bottom Right", "Bottom Left", "Top Left"], group = G_DSH)
+string dashSize = input.string("Small", "Size", ["Tiny", "Small", "Normal"], group = G_DSH)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═════════════════════════════════════════════════════════════════════════════
+f_style(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+f_tfLabel(string tf) =>
+    int sec = timeframe.in_seconds(tf)
+    sec < 3600 ? str.tostring(math.round(sec / 60)) + "m" : sec < 86400 ? str.tostring(math.round(sec / 3600)) + "H" : sec < 604800 ? str.tostring(math.round(sec / 86400)) + "D" : tf
+
+f_px(float x) =>
+    str.tostring(x, format.mintick)
+
+f_pos(string p) =>
+    switch p
+        "Top Right"   => position.top_right
+        "Bottom Left" => position.bottom_left
+        "Top Left"    => position.top_left
+        => position.bottom_right
+
+f_size(string s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Normal" => size.normal
+        => size.small
+
+// Core CRT rule. Returns [bearish, bullish] for range candle (1) and sweep candle (2).
+f_detect(float o1, float h1, float l1, float c1, float o2, float h2, float l2, float c2) =>
+    bool sweptH = h2 > h1
+    bool sweptL = l2 < l1
+    bool inside = c2 < h1 and c2 > l1
+    bool bear   = sweptH and not sweptL and inside
+    bool bull   = sweptL and not sweptH and inside
+    if qualityOnly
+        bool openIn = o2 <= h1 and o2 >= l1
+        bear := bear and openIn
+        bull := bull and openIn
+    if oppColor
+        bear := bear and c1 > o1 and c2 < o2
+        bull := bull and c1 < o1 and c2 > o2
+    float body1  = math.abs(c1 - o1)
+    float wick1  = (h1 - l1) - body1
+    bool  wickOk = maxWick <= 0 or (body1 > 0 and wick1 <= body1 * maxWick / 100)
+    [bear and wickOk, bull and wickOk]
+
+// Last two CLOSED higher-timeframe candles (non-repainting: offset + lookahead_on).
+f_pair() =>
+    [time[2], open[2], high[2], low[2], close[2], open[1], high[1], low[1], close[1]]
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CRT STATE
+// ═════════════════════════════════════════════════════════════════════════════
+type Crt
+    string tf
+    string lbl
+    string sty
+    int    dir    = 0
+    float  crh
+    float  crl
+    float  tp1
+    float  tp2
+    float  inval
+    bool   tp1Hit = false
+    bool   done   = false
+    string status = "Waiting"
+    float  c3o
+    float  c3h
+    float  c3l
+    line   lH
+    line   lL
+    line   lT
+    label  bH
+    label  bL
+    label  bT
+
+method clearDraw(Crt s) =>
+    line.delete(s.lH)
+    line.delete(s.lL)
+    line.delete(s.lT)
+    label.delete(s.bH)
+    label.delete(s.bL)
+    label.delete(s.bT)
+
+method freeze(Crt s) =>
+    for l in array.from(s.lH, s.lL, s.lT)
+        if not na(l)
+            l.set_extend(extend.none)
+            l.set_x2(time)
+
+method start(Crt s, int dir, float h1, float l1, float h2, float l2, int t1) =>
+    if keepHist
+        s.freeze()
+    else
+        s.clearDraw()
+    s.dir    := dir
+    s.crh    := h1
+    s.crl    := l1
+    s.tp1    := (h1 + l1) / 2
+    s.tp2    := dir == -1 ? l1 : h1
+    s.inval  := dir == -1 ? h2 : l2
+    s.tp1Hit := false
+    s.done   := false
+    s.status := dir == -1 ? "Bear CRT ▼" : "Bull CRT ▲"
+    string st = f_style(s.sty)
+    color  dc = dir == 1 ? bullCol : bearCol
+    string hTxt = "CRH " + s.lbl + (dir == -1 ? " ▼" : "") + (showTP and dir == 1 ? " | TP2" : "")
+    string lTxt = "CRL " + s.lbl + (dir == 1 ? " ▲" : "") + (showTP and dir == -1 ? " | TP2" : "")
+    s.lH := line.new(t1, h1, time, h1, xloc.bar_time, extend.right, dir == -1 ? dc : lvlCol, st, 1)
+    s.lL := line.new(t1, l1, time, l1, xloc.bar_time, extend.right, dir == 1 ? dc : lvlCol, st, 1)
+    s.bH := label.new(time, h1, hTxt, xloc.bar_time, yloc.price, color(na), label.style_label_left, dir == -1 ? dc : lvlCol, size.small)
+    s.bL := label.new(time, l1, lTxt, xloc.bar_time, yloc.price, color(na), label.style_label_left, dir == 1 ? dc : lvlCol, size.small)
+    if showTP
+        s.lT := line.new(t1, s.tp1, time, s.tp1, xloc.bar_time, extend.right, color.new(dc, 30), line.style_dashed, 1)
+        s.bT := label.new(time, s.tp1, "TP1 " + s.lbl + " (50%)", xloc.bar_time, yloc.price, color(na), label.style_label_left, dc, size.small)
+
+// Follows an active CRT on every chart bar. Returns [tp1Hit, tp2Hit, invalidated] events.
+method track(Crt s) =>
+    bool e1 = false
+    bool e2 = false
+    bool ei = false
+    if s.dir != 0 and not s.done
+        bool hitTp1 = s.dir == -1 ? low <= s.tp1 : high >= s.tp1
+        bool hitTp2 = s.dir == -1 ? low <= s.tp2 : high >= s.tp2
+        bool broke  = s.dir == -1 ? high > s.inval : low < s.inval
+        if not s.tp1Hit and hitTp1
+            s.tp1Hit := true
+            e1 := true
+            s.status := "TP1 ✓"
+            if not na(s.bT)
+                s.bT.set_text("TP1 " + s.lbl + " ✓")
+        if hitTp2
+            s.done := true
+            e2 := true
+            s.status := "TP2 ✓ done"
+        else if broke
+            s.done := true
+            ei := true
+            s.status := s.tp1Hit ? "TP1 ✓ / stopped" : "Invalidated ✗"
+        if s.done
+            s.freeze()
+    [e1, e2, ei]
+
+method moveLabels(Crt s, int x) =>
+    if s.dir != 0 and not s.done
+        for b in array.from(s.bH, s.bL, s.bT)
+            if not na(b)
+                b.set_x(x)
+
+// One timeframe, one chart bar. `tf` is passed separately so it stays a simple string.
+f_step(Crt s, string tf, bool on, int t1, float o1, float h1, float l1, float c1, float o2, float h2, float l2, float c2) =>
+    bool newHtf = timeframe.change(tf)
+    // live (still open) HTF candle, built from chart bars
+    if newHtf or na(s.c3o)
+        s.c3o := open
+        s.c3h := high
+        s.c3l := low
+    else
+        s.c3h := math.max(s.c3h, high)
+        s.c3l := math.min(s.c3l, low)
+    bool nBull = false
+    bool nBear = false
+    if on and newHtf
+        [isBear, isBull] = f_detect(o1, h1, l1, c1, o2, h2, l2, c2)
+        if isBear
+            s.start(-1, h1, l1, h2, l2, t1)
+            nBear := true
+        else if isBull
+            s.start(1, h1, l1, h2, l2, t1)
+            nBull := true
+    [e1, e2, ei] = s.track()
+    [nBull, nBear, e1, e2, ei]
+
+f_alert(Crt s, bool nBull, bool nBear, bool e1, bool e2, bool ei) =>
+    string sym = syminfo.ticker
+    if alNew and (nBull or nBear)
+        alert(str.format("{0} | CRT {1} {2} | TP1 (50%): {3} | TP2: {4} | Invalid: {5}",
+             sym, s.lbl, nBull ? "BULL 🟢" : "BEAR 🔴", f_px(s.tp1), f_px(s.tp2), f_px(s.inval)), alert.freq_once_per_bar)
+    if alTP1 and e1
+        alert(str.format("{0} | CRT {1} {2} | TP1 hit ✓ {3}", sym, s.lbl, s.dir == 1 ? "BULL" : "BEAR", f_px(s.tp1)), alert.freq_once_per_bar)
+    if alTP2 and e2
+        alert(str.format("{0} | CRT {1} {2} | TP2 hit ✓ {3}", sym, s.lbl, s.dir == 1 ? "BULL" : "BEAR", f_px(s.tp2)), alert.freq_once_per_bar)
+    if alInv and ei
+        alert(str.format("{0} | CRT {1} {2} | invalidated beyond {3}", sym, s.lbl, s.dir == 1 ? "BULL" : "BEAR", f_px(s.inval)), alert.freq_once_per_bar)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DATA + ENGINE
+// ═════════════════════════════════════════════════════════════════════════════
+int chartSec = timeframe.in_seconds(timeframe.period)
+bool on1 = tf1On and timeframe.in_seconds(tf1) >= chartSec
+bool on2 = tf2On and timeframe.in_seconds(tf2) >= chartSec
+bool on3 = tf3On and timeframe.in_seconds(tf3) >= chartSec
+
+[a_t1, a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2] = request.security(syminfo.tickerid, tf1, f_pair(), lookahead = barmerge.lookahead_on)
+[b_t1, b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2] = request.security(syminfo.tickerid, tf2, f_pair(), lookahead = barmerge.lookahead_on)
+[c_t1, c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2] = request.security(syminfo.tickerid, tf3, f_pair(), lookahead = barmerge.lookahead_on)
+
+var Crt s1 = Crt.new(tf1, f_tfLabel(tf1), tf1Sty)
+var Crt s2 = Crt.new(tf2, f_tfLabel(tf2), tf2Sty)
+var Crt s3 = Crt.new(tf3, f_tfLabel(tf3), tf3Sty)
+
+[n1u, n1d, e11, e12, e1i] = f_step(s1, tf1, on1, a_t1, a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2)
+[n2u, n2d, e21, e22, e2i] = f_step(s2, tf2, on2, b_t1, b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2)
+[n3u, n3d, e31, e32, e3i] = f_step(s3, tf3, on3, c_t1, c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2)
+
+f_alert(s1, n1u, n1d, e11, e12, e1i)
+f_alert(s2, n2u, n2d, e21, e22, e2i)
+f_alert(s3, n3u, n3d, e31, e32, e3i)
+
+// Small markers on the bar where a CRT is confirmed
+bool anyBull = n1u or n2u or n3u
+bool anyBear = n1d or n2d or n3d
+plotshape(anyBull, "Bull CRT", shape.triangleup, location.belowbar, bullCol, size = size.tiny)
+plotshape(anyBear, "Bear CRT", shape.triangledown, location.abovebar, bearCol, size = size.tiny)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SESSIONS
+// ═════════════════════════════════════════════════════════════════════════════
+bool sesOk = showSes and timeframe.isintraday and chartSec <= 3600
+bgcolor(sesOk and not na(time(timeframe.period, asiaS, sesTz)) ? asiaC : na, title = "Asia")
+bgcolor(sesOk and not na(time(timeframe.period, lonS, sesTz)) ? lonC : na, title = "London")
+bgcolor(sesOk and not na(time(timeframe.period, nyS, sesTz)) ? nyC : na, title = "New York")
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HTF CANDLES TO THE RIGHT + LABEL POSITIONS
+// ═════════════════════════════════════════════════════════════════════════════
+var array<box>   miniBoxes = array.new<box>()
+var array<line>  miniLines = array.new<line>()
+var array<label> miniLbls  = array.new<label>()
+
+f_candle(int x, float o, float h, float l, float c) =>
+    if not na(o) and not na(c)
+        color col = c >= o ? bullCol : bearCol
+        miniLines.push(line.new(x, h, x, l, xloc.bar_index, extend.none, col, line.style_solid, 1))
+        miniBoxes.push(box.new(x - 1, math.max(o, c), x + 1, math.min(o, c), border_color = col, bgcolor = col, xloc = xloc.bar_index))
+
+f_miniGroup(Crt s, bool on, int x, float o1, float h1, float l1, float c1, float o2, float h2, float l2, float c2) =>
+    int nx = x
+    if on
+        f_candle(x, o1, h1, l1, c1)
+        f_candle(x + 3, o2, h2, l2, c2)
+        f_candle(x + 6, s.c3o, s.c3h, s.c3l, close)
+        float lo = math.min(nz(l1, low), nz(l2, low), nz(s.c3l, low))
+        miniLbls.push(label.new(x + 3, lo, s.lbl, xloc.bar_index, yloc.price, color(na), label.style_label_up, chart.fg_color, size.normal))
+        nx := x + 13
+    nx
+
+if barstate.islast
+    int lblX = time + 2 * chartSec * 1000
+    s1.moveLabels(lblX)
+    s2.moveLabels(lblX)
+    s3.moveLabels(lblX)
+
+    for b in miniBoxes
+        b.delete()
+    for l in miniLines
+        l.delete()
+    for b in miniLbls
+        b.delete()
+    miniBoxes.clear()
+    miniLines.clear()
+    miniLbls.clear()
+    if showMini
+        int x = bar_index + miniOff
+        x := f_miniGroup(s1, on1, x, a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2)
+        x := f_miniGroup(s2, on2, x, b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2)
+        x := f_miniGroup(s3, on3, x, c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═════════════════════════════════════════════════════════════════════════════
+var table dash = table.new(f_pos(dashPos), 3, 4, bgcolor = color.new(#131722, 10), border_color = color.new(#363A45, 0), border_width = 1, frame_color = color.new(#363A45, 0), frame_width = 1)
+
+f_forming(Crt s, bool on, float o2, float h2, float l2, float c2) =>
+    string r = ""
+    if on and showUnconf and not na(s.c3o)
+        [fb, fu] = f_detect(o2, h2, l2, c2, s.c3o, s.c3h, s.c3l, close)
+        r := fb ? "Forming ▼" : fu ? "Forming ▲" : "–"
+    r
+
+f_row(int row, Crt s, bool enabled, bool on, string forming) =>
+    string ts = f_size(dashSize)
+    color  sc = s.dir == 1 ? bullCol : s.dir == -1 ? bearCol : #B2B5BE
+    if s.done
+        sc := color.new(sc, 40)
+    string st = not enabled ? "OFF" : not on ? "TF < chart" : s.status
+    table.cell(dash, 0, row, s.lbl, text_color = color.white, text_size = ts, text_halign = text.align_left)
+    table.cell(dash, 1, row, st, text_color = on ? sc : #787B86, text_size = ts, text_halign = text.align_left)
+    table.cell(dash, 2, row, forming, text_color = str.contains(forming, "▲") ? bullCol : str.contains(forming, "▼") ? bearCol : #787B86, text_size = ts)
+
+if barstate.islast and showDash
+    string ts = f_size(dashSize)
+    table.cell(dash, 0, 0, "CRT", text_color = color.white, text_size = ts)
+    table.cell(dash, 1, 0, "Status", text_color = #B2B5BE, text_size = ts)
+    table.cell(dash, 2, 0, showUnconf ? "Live" : "", text_color = #B2B5BE, text_size = ts)
+    f_row(1, s1, tf1On, on1, f_forming(s1, on1, a_o2, a_h2, a_l2, a_c2))
+    f_row(2, s2, tf2On, on2, f_forming(s2, on2, b_o2, b_h2, b_l2, b_c2))
+    f_row(3, s3, tf3On, on3, f_forming(s3, on3, c_o2, c_h2, c_l2, c_c2))
