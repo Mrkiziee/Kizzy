@@ -22,6 +22,9 @@
 //  OCL  Open/Close Level   wick taps an older body (open/close) swing level, closes back on the other side
 //  IFVG Inverse FVG        wick taps an FVG that price already closed through (polarity flipped)
 //
+// Time filter: 4H CRTs only when the sweep candle opens at 1am / 5am / 9am New York.
+// LTF entry: Turtle Body Soup (TBS) on the chart timeframe while a CRT is active.
+// Statistics table: TP1 / TP2 / stop rates per CRT type and for TBS entries.
 // HTF bias: Bull CRT only when the sweep low is in DISCOUNT of the key-TF range, Bear only in PREMIUM.
 //
 // Targets: TP1 = 50% of the range, TP2 = opposite side of the range.
@@ -87,6 +90,25 @@ const string G_BIA = "HTF Bias – Premium / Discount"
 bool useBias = input.bool(true, "Premium / Discount filter", group = G_BIA,
      tooltip = "Uses the range of the last N closed candles of the key-level TF.\nBull CRT: the sweep low must be in DISCOUNT (below 50%).\nBear CRT: the sweep high must be in PREMIUM (above 50%).")
 int  biasN   = input.int(1, "Range = last N key-TF candles", minval = 1, maxval = 20, group = G_BIA)
+
+const string G_TIM = "Time Filter (4H CRT)"
+bool   useTime   = input.bool(true, "4H: sweep candle must open at these NY hours", group = G_TIM,
+     tooltip = "Only applies to rows whose CRT TF is 4H. The sweep candle (C2) must open at one of these New York hours (Romeo's 1am / 5am / 9am 4H candles).")
+string timeHours = input.string("1,5,9", "NY hours (comma separated)", group = G_TIM)
+
+const string G_ENT = "LTF Entry – Turtle Body Soup (chart TF)"
+bool useTBS   = input.bool(true, "TBS entry on the chart timeframe", group = G_ENT,
+     tooltip = "While a CRT is active (before TP1): a chart candle BODY closes beyond the latest chart-TF swing high (bear) / low (bull), then within N bars a candle closes back inside → entry. SL = extreme of the soup, target TP1/TP2.\nUse a chart TF lower than the CRT TF (e.g. 5m–15m for a 1H/4H CRT).")
+int  tbsLen   = input.int(3, "Chart swing length", minval = 1, maxval = 10, group = G_ENT)
+int  tbsWin   = input.int(3, "Bars allowed to close back", minval = 1, maxval = 20, group = G_ENT)
+bool allowTWS = input.bool(false, "Also allow Turtle Wick Soup (TWS)", group = G_ENT,
+     tooltip = "Wick-only sweep that closes back on the same bar. Weaker – off by default.")
+bool alTBS    = input.bool(true, "Alert on TBS entry", group = G_ENT)
+
+const string G_STA = "Statistics"
+bool   showStats = input.bool(true, "Show statistics table", group = G_STA,
+     tooltip = "Counts the CRTs found on the loaded chart history (more bars = better sample). Two Candle 'delivered' setups are not counted.")
+string statsPos  = input.string("Top Right", "Position", ["Top Right", "Bottom Right", "Bottom Left", "Top Left"], group = G_STA)
 
 bool  qualityOnly = input.bool(true, "Quality CRT Only", group = G_FLT,
      tooltip = "The sweep candle must OPEN inside the range: only its wick sweeps the high/low.")
@@ -526,6 +548,12 @@ type Crt
     label  bL
     label  bT
     label  bK
+    float  tbsLvl          // chart-TF swing level the body closed through
+    int    tbsBar
+    float  tbsExt          // extreme of the soup (stop)
+    bool   entered = false
+    bool   inTrade = false
+    float  sl
 
 method clearDraw(Crt s) =>
     line.delete(s.lH)
@@ -581,6 +609,9 @@ method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int
     s.multi   := false
     s.lK      := na
     s.bK      := na
+    s.tbsLvl  := na
+    s.entered := false
+    s.inTrade := false
     string st  = f_style(s.sty)
     color  dc  = dir == 1 ? bullCol : bearCol
     string tag = " " + f_code(kind)
@@ -630,6 +661,49 @@ method track(Crt s) =>
             s.freeze()
     [e1, e2, ei]
 
+// Turtle Body Soup entry on the chart TF. ph/pl = latest chart-TF swing high/low.
+// Returns [entry, win (TP1 before SL), loss (SL first)].
+method tbs(Crt s, float ph, float pl) =>
+    bool ent = false
+    bool win = false
+    bool los = false
+    if s.inTrade
+        bool hitSL = s.dir == -1 ? high >= s.sl : low <= s.sl
+        bool hitTP = s.dir == -1 ? low <= s.tp1 : high >= s.tp1
+        if hitSL
+            s.inTrade := false
+            los := true
+        else if hitTP
+            s.inTrade := false
+            win := true
+    else if useTBS and s.dir != 0 and not s.done and not s.entered and not s.tp1Hit
+        float lvl = s.dir == -1 ? ph : pl
+        if na(s.tbsLvl)
+            if not na(lvl)
+                bool farSide  = s.dir == -1 ? lvl > s.tp1 : lvl < s.tp1
+                bool bodyOut  = s.dir == -1 ? close > lvl and close[1] <= lvl : close < lvl and close[1] >= lvl
+                bool wickOnly = s.dir == -1 ? high > lvl and close < lvl : low < lvl and close > lvl
+                if farSide and bodyOut
+                    s.tbsLvl := lvl
+                    s.tbsBar := bar_index
+                    s.tbsExt := s.dir == -1 ? high : low
+                else if farSide and allowTWS and wickOnly
+                    ent  := true
+                    s.sl := s.dir == -1 ? high : low
+        else
+            s.tbsExt := s.dir == -1 ? math.max(s.tbsExt, high) : math.min(s.tbsExt, low)
+            bool back = s.dir == -1 ? close < s.tbsLvl : close > s.tbsLvl
+            if back
+                ent  := true
+                s.sl := s.tbsExt
+            else if bar_index - s.tbsBar >= tbsWin
+                s.tbsLvl := na
+        if ent
+            s.entered := true
+            s.inTrade := true
+            s.tbsLvl  := na
+    [ent, win, los]
+
 method moveLabels(Crt s, int x) =>
     if s.dir != 0 and not s.done
         for b in array.from(s.bH, s.bL, s.bT, s.bK)
@@ -637,6 +711,15 @@ method moveLabels(Crt s, int x) =>
                 b.set_x(x)
 
 // One timeframe, one chart bar. `tf` is passed separately so it stays a simple string.
+// NY hour of a timestamp is in the "1,5,9" list
+f_hourOk(int t) =>
+    string h  = str.tostring(hour(t, "America/New_York"))
+    bool   ok = false
+    for x in str.split(timeHours, ",")
+        if str.trim(x) == h
+            ok := true
+    ok
+
 // k1/k2 = key store as of the last / previous closed key-TF bar, kClose = close time of that bar,
 // bh/bl = premium-discount range, sh/sl/sc/st = sweep candle high/low/close/open time.
 f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float iv, int tr,
@@ -662,7 +745,8 @@ f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float i
         float tip   = dir == 1 ? sl : sh
         bool  pdOk  = not useBias or na(eq) or (dir == 1 ? tip <= eq : tip >= eq)
         bool  keyOk = not reqKey or km > 0
-        if pdOk and keyOk
+        bool  timeOk = not useTime or timeframe.in_seconds(tf) != 14400 or f_hourOk(st)
+        if pdOk and keyOk and timeOk
             s.start(kind, dir, rh, rl, iv, tr, km, kp)
             s.pd  := na(eq) ? "" : tip < eq ? "Disc" : "Prem"
             nBull := dir == 1
@@ -715,6 +799,62 @@ var Crt s3 = Crt.new(tf3, f_tfLabel(tf3), tf3Sty, f_tfLabel(f_keyTF(tf3)))
 f_alert(s1, n1u, n1d, e11, e12, e1i)
 f_alert(s2, n2u, n2d, e21, e22, e2i)
 f_alert(s3, n3u, n3d, e31, e32, e3i)
+
+// ─── statistics (index = CRT kind; 0 = TBS entries) ─────────────────────────
+var array<int> stN   = array.new<int>(6, 0)
+var array<int> stT1  = array.new<int>(6, 0)
+var array<int> stT2  = array.new<int>(6, 0)
+var array<int> stInv = array.new<int>(6, 0)
+var array<int> stMC  = array.new<int>(6, 0)
+
+f_stats(Crt s, bool nBull, bool nBear, bool e1, bool e2, bool ei) =>
+    if s.kind != K_2D and s.kind > 0
+        if nBull or nBear
+            stN.set(s.kind, stN.get(s.kind) + 1)
+        if e1
+            stT1.set(s.kind, stT1.get(s.kind) + 1)
+        if e2
+            stT2.set(s.kind, stT2.get(s.kind) + 1)
+            if s.multi
+                stMC.set(s.kind, stMC.get(s.kind) + 1)
+        if ei
+            stInv.set(s.kind, stInv.get(s.kind) + 1)
+
+f_stats(s1, n1u, n1d, e11, e12, e1i)
+f_stats(s2, n2u, n2d, e21, e22, e2i)
+f_stats(s3, n3u, n3d, e31, e32, e3i)
+
+// ─── TBS entries on the chart TF ─────────────────────────────────────────────
+float lph = ta.pivothigh(high, tbsLen, tbsLen)
+float lpl = ta.pivotlow(low, tbsLen, tbsLen)
+var float lastPH = na
+var float lastPL = na
+if not na(lph)
+    lastPH := lph
+if not na(lpl)
+    lastPL := lpl
+
+f_tbsOut(Crt s, bool ent, bool win, bool los) =>
+    if ent
+        stN.set(0, stN.get(0) + 1)
+        color  dc  = s.dir == 1 ? bullCol : bearCol
+        string tip = str.format("TBS {0} {1} CRT\nEntry: {2}\nSL: {3}\nTP1: {4}\nTP2: {5}", s.lbl, f_name(s.kind), f_px(close), f_px(s.sl), f_px(s.tp1), f_px(s.tp2))
+        label.new(bar_index, s.dir == 1 ? low : high, "TBS " + s.lbl, xloc.bar_index, yloc.price, dc,
+             s.dir == 1 ? label.style_label_up : label.style_label_down, color.white, size.small, tooltip = tip)
+        if alTBS
+            alert(str.format("{0} | TBS {1} entry {2} ({3} CRT) | Entry: {4} | SL: {5} | TP1: {6} | TP2: {7}", syminfo.ticker,
+                 s.dir == 1 ? "BUY 🟢" : "SELL 🔴", s.lbl, f_name(s.kind), f_px(close), f_px(s.sl), f_px(s.tp1), f_px(s.tp2)), alert.freq_once_per_bar_close)
+    if win
+        stT1.set(0, stT1.get(0) + 1)
+    if los
+        stInv.set(0, stInv.get(0) + 1)
+
+[t1e, t1w, t1l] = s1.tbs(lastPH, lastPL)
+f_tbsOut(s1, t1e, t1w, t1l)
+[t2e, t2w, t2l] = s2.tbs(lastPH, lastPL)
+f_tbsOut(s2, t2e, t2w, t2l)
+[t3e, t3w, t3l] = s3.tbs(lastPH, lastPL)
+f_tbsOut(s3, t3e, t3w, t3l)
 
 // Small markers on the bar where a CRT is confirmed
 bool anyBull = n1u or n2u or n3u
@@ -807,3 +947,33 @@ if barstate.islast and showDash
     f_row(1, s1, tf1On, on1, f_forming(s1, on1, a_o2, a_h2, a_l2, a_c2))
     f_row(2, s2, tf2On, on2, f_forming(s2, on2, b_o2, b_h2, b_l2, b_c2))
     f_row(3, s3, tf3On, on3, f_forming(s3, on3, c_o2, c_h2, c_l2, c_c2))
+
+// ═════════════════════════════════════════════════════════════════════════════
+// STATISTICS TABLE
+// ═════════════════════════════════════════════════════════════════════════════
+var table stTab = table.new(f_pos(statsPos), 5, 7, bgcolor = color.new(#131722, 10), border_color = color.new(#363A45, 0), border_width = 1, frame_color = color.new(#363A45, 0), frame_width = 1)
+
+f_pct(int a, int n) =>
+    n > 0 ? str.tostring(math.round(100.0 * a / n)) + "%" : "–"
+
+f_stRow(int row, string name, int k, bool isTbs) =>
+    string ts = f_size(dashSize)
+    int    n  = stN.get(k)
+    table.cell(stTab, 0, row, name, text_color = color.white, text_size = ts, text_halign = text.align_left)
+    table.cell(stTab, 1, row, str.tostring(n), text_color = #B2B5BE, text_size = ts)
+    table.cell(stTab, 2, row, f_pct(stT1.get(k), n), text_color = bullCol, text_size = ts)
+    table.cell(stTab, 3, row, isTbs ? "–" : f_pct(stT2.get(k), n) + (stMC.get(k) > 0 ? " (MC " + str.tostring(stMC.get(k)) + ")" : ""), text_color = bullCol, text_size = ts)
+    table.cell(stTab, 4, row, f_pct(stInv.get(k), n), text_color = bearCol, text_size = ts)
+
+if barstate.islast and showStats
+    string ts = f_size(dashSize)
+    table.cell(stTab, 0, 0, "Stats", text_color = color.white, text_size = ts)
+    table.cell(stTab, 1, 0, "N", text_color = #B2B5BE, text_size = ts)
+    table.cell(stTab, 2, 0, "TP1", text_color = #B2B5BE, text_size = ts)
+    table.cell(stTab, 3, 0, "TP2", text_color = #B2B5BE, text_size = ts)
+    table.cell(stTab, 4, 0, "Stop", text_color = #B2B5BE, text_size = ts)
+    f_stRow(1, "Classic", K_CL, false)
+    f_stRow(2, "Two Candle", K_2C, false)
+    f_stRow(3, "Double Purge", K_DP, false)
+    f_stRow(4, "Inside Bar", K_IB, false)
+    f_stRow(5, "TBS entry", 0, true)
