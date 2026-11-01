@@ -12,7 +12,8 @@
 //  4 · Double Purge CRT   C2 sweeps one side, C3 sweeps the OTHER side, both close inside C1 → trade C3's reversal.
 //  5 · Inside Bar CRT     Mother bar + 1..N inside bars, then a candle sweeps the mother bar and closes inside.
 //
-// Key levels (the sweep wick must tap one – shown as 🔑 tags, optional filter)
+// Key levels – taken from a HIGHER TF than the CRT candle (top-down, Romeo style).
+// The sweep wick must tap one (filter on by default) – shown as 🔑 tags.
 //  OHP  Old High Purge     wick takes an older swing high, closes back below it        (bearish)
 //  OLP  Old Low Purge      wick takes an older swing low, closes back above it         (bullish)
 //  RB   Rejection Block    wick taps the wick zone (body → wick extreme) of an older swing candle
@@ -20,6 +21,8 @@
 //  FVG  Fair Value Gap     wick taps an open 3-candle imbalance
 //  OCL  Open/Close Level   wick taps an older body (open/close) swing level, closes back on the other side
 //  IFVG Inverse FVG        wick taps an FVG that price already closed through (polarity flipped)
+//
+// HTF bias: Bull CRT only when the sweep low is in DISCOUNT of the key-TF range, Bear only in PREMIUM.
 //
 // Targets: TP1 = 50% of the range, TP2 = opposite side of the range.
 // Invalidation: price trades beyond the sweep candle's extreme before TP2.
@@ -70,12 +73,20 @@ bool kOB   = input.bool(true, "OB – Order Block", group = G_KEY)
 bool kFVG  = input.bool(true, "FVG – Fair Value Gap", group = G_KEY)
 bool kOCL  = input.bool(true, "OCL – Open / Close Level", group = G_KEY)
 bool kIFVG = input.bool(true, "IFVG – Inverse FVG", group = G_KEY)
-bool reqKey = input.bool(false, "Only CRTs that tap a key level", group = G_KEY,
-     tooltip = "Hide/skip CRTs whose sweep wick did not tap any enabled key level.")
+string keyMode = input.string("One step higher", "Key level TF", ["One step higher", "Same as CRT TF", "Fixed"], inline = "ktf", group = G_KEY,
+     tooltip = "Romeo-style top-down: key levels come from a HIGHER timeframe than the CRT candle.\nOne step higher: ≤1H → 4H, 4H → D, D → W, W → M.\nFixed: use the TF on the right for every row.")
+string keyFix  = input.timeframe("D", "", inline = "ktf", group = G_KEY)
+bool reqKey = input.bool(true, "Only CRTs that tap a key level", group = G_KEY,
+     tooltip = "Skip CRTs whose sweep wick did not tap any enabled key level of the key-level TF.")
 int  keyLen = input.int(3, "Swing length", minval = 1, maxval = 10, group = G_KEY,
-     tooltip = "Bars on each side (on the CRT timeframe) that confirm a swing high/low for OHP/OLP, RB and OCL.")
+     tooltip = "Bars on each side (on the key-level TF) that confirm a swing high/low for OHP/OLP, RB and OCL.")
 int  keyMax = input.int(6, "Levels kept per type", minval = 1, maxval = 20, group = G_KEY)
 bool showKey = input.bool(true, "Draw tapped key level", group = G_KEY)
+
+const string G_BIA = "HTF Bias – Premium / Discount"
+bool useBias = input.bool(true, "Premium / Discount filter", group = G_BIA,
+     tooltip = "Uses the range of the last N closed candles of the key-level TF.\nBull CRT: the sweep low must be in DISCOUNT (below 50%).\nBear CRT: the sweep high must be in PREMIUM (above 50%).")
+int  biasN   = input.int(1, "Range = last N key-TF candles", minval = 1, maxval = 20, group = G_BIA)
 
 bool  qualityOnly = input.bool(true, "Quality CRT Only", group = G_FLT,
      tooltip = "The sweep candle must OPEN inside the range: only its wick sweeps the high/low.")
@@ -210,38 +221,38 @@ f_pushZ(array<float> t, array<float> b, float top, float bot) =>
         t.pop()
         b.pop()
 
-// level purged by the wick, close back on the other side
-f_lvlBear(array<float> lv) =>
+// level purged by the wick (h / l), close (c) back on the other side
+f_lvlBear(array<float> lv, float h, float c) =>
     float r = na
     for v in lv
-        if high >= v and close < v
+        if h >= v and c < v
             r := v
             break
     r
 
-f_lvlBull(array<float> lv) =>
+f_lvlBull(array<float> lv, float l, float c) =>
     float r = na
     for v in lv
-        if low <= v and close > v
+        if l <= v and c > v
             r := v
             break
     r
 
 // wick taps the zone and closes back away from it
-f_zoneBear(array<float> t, array<float> b) =>
+f_zoneBear(array<float> t, array<float> b, float h, float c) =>
     float r = na
     for [i, top] in t
         float bot = b.get(i)
-        if high >= bot and close < top
+        if h >= bot and c < top
             r := bot
             break
     r
 
-f_zoneBull(array<float> t, array<float> b) =>
+f_zoneBull(array<float> t, array<float> b, float l, float c) =>
     float r = na
     for [i, top] in t
         float bot = b.get(i)
-        if low <= top and close > bot
+        if l <= top and c > bot
             r := top
             break
     r
@@ -284,85 +295,115 @@ f_mask(float v1, float v2, float v3, float v4, float v5, float v6) =>
         bit *= 2
     [m, p]
 
-// Tracks key levels on the HTF and tests the current (sweep) candle against them.
-// Must be called on every HTF bar. Returns [bitMask, firstLevelPrice].
-f_keys(int dir) =>
-    var array<float> pvH  = array.new<float>()   // swing highs           (OHP)
-    var array<float> pvL  = array.new<float>()   // swing lows            (OLP)
-    var array<float> ocH  = array.new<float>()   // body swing highs      (OCL)
-    var array<float> ocL  = array.new<float>()   // body swing lows       (OCL)
-    var array<float> rbHT = array.new<float>()   // rejection block above (wick high)
-    var array<float> rbHB = array.new<float>()   //                       (body top)
-    var array<float> rbLT = array.new<float>()   // rejection block below (body bottom)
-    var array<float> rbLB = array.new<float>()   //                       (wick low)
-    var array<float> obBT = array.new<float>()   // bullish OB (support)
-    var array<float> obBB = array.new<float>()
-    var array<float> obST = array.new<float>()   // bearish OB (resistance)
-    var array<float> obSB = array.new<float>()
-    var array<float> fvBT = array.new<float>()   // bullish FVG (support)
-    var array<float> fvBB = array.new<float>()
-    var array<float> fvST = array.new<float>()   // bearish FVG (resistance)
-    var array<float> fvSB = array.new<float>()
-    var array<float> ifBT = array.new<float>()   // inverse FVG acting as support
-    var array<float> ifBB = array.new<float>()
-    var array<float> ifST = array.new<float>()   // inverse FVG acting as resistance
-    var array<float> ifSB = array.new<float>()
+// All key levels of one timeframe.
+type KeyStore
+    array<float> pvH    // swing highs           (OHP)
+    array<float> pvL    // swing lows            (OLP)
+    array<float> ocH    // body swing highs      (OCL)
+    array<float> ocL    // body swing lows       (OCL)
+    array<float> rbHT   // rejection block above: wick high
+    array<float> rbHB   //                        body top
+    array<float> rbLT   // rejection block below: body bottom
+    array<float> rbLB   //                        wick low
+    array<float> obBT   // bullish OB (support)
+    array<float> obBB
+    array<float> obST   // bearish OB (resistance)
+    array<float> obSB
+    array<float> fvBT   // bullish FVG (support)
+    array<float> fvBB
+    array<float> fvST   // bearish FVG (resistance)
+    array<float> fvSB
+    array<float> ifBT   // inverse FVG acting as support
+    array<float> ifBB
+    array<float> ifST   // inverse FVG acting as resistance
+    array<float> ifSB
 
-    int   mask = 0
-    float px   = na
-    // 1) test the sweep candle against levels that existed BEFORE it
-    if dir == -1
-        [m, p] = f_mask(kOX ? f_lvlBear(pvH) : na, kRB ? f_zoneBear(rbHT, rbHB) : na, kOB ? f_zoneBear(obST, obSB) : na,
-             kFVG ? f_zoneBear(fvST, fvSB) : na, kOCL ? f_lvlBear(ocH) : na, kIFVG ? f_zoneBear(ifST, ifSB) : na)
-        mask := m
-        px   := p
-    else if dir == 1
-        [m, p] = f_mask(kOX ? f_lvlBull(pvL) : na, kRB ? f_zoneBull(rbLT, rbLB) : na, kOB ? f_zoneBull(obBT, obBB) : na,
-             kFVG ? f_zoneBull(fvBT, fvBB) : na, kOCL ? f_lvlBull(ocL) : na, kIFVG ? f_zoneBull(ifBT, ifBB) : na)
-        mask := m
-        px   := p
+f_newStore() =>
+    KeyStore.new(array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
+         array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
+         array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
+         array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>())
 
-    // 2) update the stores with the current bar
+method snapshot(KeyStore k) =>
+    KeyStore.new(k.pvH.copy(), k.pvL.copy(), k.ocH.copy(), k.ocL.copy(), k.rbHT.copy(),
+         k.rbHB.copy(), k.rbLT.copy(), k.rbLB.copy(), k.obBT.copy(), k.obBB.copy(),
+         k.obST.copy(), k.obSB.copy(), k.fvBT.copy(), k.fvBB.copy(), k.fvST.copy(),
+         k.fvSB.copy(), k.ifBT.copy(), k.ifBB.copy(), k.ifST.copy(), k.ifSB.copy())
+
+// Runs ON THE KEY-LEVEL TF: updates the store with the current bar.
+method update(KeyStore k) =>
     float ph  = ta.pivothigh(high, keyLen, keyLen)
     float pl  = ta.pivotlow(low, keyLen, keyLen)
     float bph = ta.pivothigh(math.max(open, close), keyLen, keyLen)
     float bpl = ta.pivotlow(math.min(open, close), keyLen, keyLen)
 
-    f_dropLvl(pvH, true)
-    f_dropLvl(pvL, false)
-    f_dropLvl(ocH, true)
-    f_dropLvl(ocL, false)
-    f_dropZone(rbHT, rbHB, true)
-    f_dropZone(rbLT, rbLB, false)
-    f_dropZone(obST, obSB, true)
-    f_dropZone(obBT, obBB, false)
-    f_dropZone(ifST, ifSB, true)
-    f_dropZone(ifBT, ifBB, false)
-    f_invert(fvBT, fvBB, ifST, ifSB, false)   // bullish FVG closed below → resistance IFVG
-    f_invert(fvST, fvSB, ifBT, ifBB, true)    // bearish FVG closed above → support IFVG
+    f_dropLvl(k.pvH, true)
+    f_dropLvl(k.pvL, false)
+    f_dropLvl(k.ocH, true)
+    f_dropLvl(k.ocL, false)
+    f_dropZone(k.rbHT, k.rbHB, true)
+    f_dropZone(k.rbLT, k.rbLB, false)
+    f_dropZone(k.obST, k.obSB, true)
+    f_dropZone(k.obBT, k.obBB, false)
+    f_dropZone(k.ifST, k.ifSB, true)
+    f_dropZone(k.ifBT, k.ifBB, false)
+    f_invert(k.fvBT, k.fvBB, k.ifST, k.ifSB, false)   // bullish FVG closed below → resistance IFVG
+    f_invert(k.fvST, k.fvSB, k.ifBT, k.ifBB, true)    // bearish FVG closed above → support IFVG
 
     if not na(ph)
-        f_push(pvH, ph)
-        f_pushZ(rbHT, rbHB, ph, math.max(open[keyLen], close[keyLen]))
+        f_push(k.pvH, ph)
+        f_pushZ(k.rbHT, k.rbHB, ph, math.max(open[keyLen], close[keyLen]))
     if not na(pl)
-        f_push(pvL, pl)
-        f_pushZ(rbLT, rbLB, math.min(open[keyLen], close[keyLen]), pl)
+        f_push(k.pvL, pl)
+        f_pushZ(k.rbLT, k.rbLB, math.min(open[keyLen], close[keyLen]), pl)
     if not na(bph)
-        f_push(ocH, bph)
+        f_push(k.ocH, bph)
     if not na(bpl)
-        f_push(ocL, bpl)
+        f_push(k.ocL, bpl)
     if low > high[2]
-        f_pushZ(fvBT, fvBB, low, high[2])
+        f_pushZ(k.fvBT, k.fvBB, low, high[2])
     if high < low[2]
-        f_pushZ(fvST, fvSB, low[2], high)
+        f_pushZ(k.fvST, k.fvSB, low[2], high)
     if close[1] < open[1] and close > high[1]
-        f_pushZ(obBT, obBB, high[1], low[1])
+        f_pushZ(k.obBT, k.obBB, high[1], low[1])
     if close[1] > open[1] and close < low[1]
-        f_pushZ(obST, obSB, high[1], low[1])
+        f_pushZ(k.obST, k.obSB, high[1], low[1])
+
+// request.security payload: the store as of the last closed key-TF bar ([1]) and the one before ([2]),
+// the close time of the last closed key-TF bar, and the premium/discount range of the last N closed bars.
+f_keyTF_data() =>
+    var KeyStore ks = f_newStore()
+    ks.update()
+    KeyStore snap = ks.snapshot()
+    [snap[1], snap[2], time_close[1], ta.highest(high, biasN)[1], ta.lowest(low, biasN)[1]]
+
+// Tests a sweep candle (h, l, c) against a key store. Returns [bitMask, firstLevelPrice].
+f_keyCheck(KeyStore k, int dir, float h, float l, float c) =>
+    int   mask = 0
+    float px   = na
+    if not na(k)
+        if dir == -1
+            [m, p] = f_mask(kOX ? f_lvlBear(k.pvH, h, c) : na, kRB ? f_zoneBear(k.rbHT, k.rbHB, h, c) : na,
+                 kOB ? f_zoneBear(k.obST, k.obSB, h, c) : na, kFVG ? f_zoneBear(k.fvST, k.fvSB, h, c) : na,
+                 kOCL ? f_lvlBear(k.ocH, h, c) : na, kIFVG ? f_zoneBear(k.ifST, k.ifSB, h, c) : na)
+            mask := m
+            px   := p
+        else if dir == 1
+            [m, p] = f_mask(kOX ? f_lvlBull(k.pvL, l, c) : na, kRB ? f_zoneBull(k.rbLT, k.rbLB, l, c) : na,
+                 kOB ? f_zoneBull(k.obBT, k.obBB, l, c) : na, kFVG ? f_zoneBull(k.fvBT, k.fvBB, l, c) : na,
+                 kOCL ? f_lvlBull(k.ocL, l, c) : na, kIFVG ? f_zoneBull(k.ifBT, k.ifBB, l, c) : na)
+            mask := m
+            px   := p
     [mask, px]
 
+// Key-level TF for a CRT TF
+f_keyTF(string tf) =>
+    int s = timeframe.in_seconds(tf)
+    string nxt = s <= 3600 ? "240" : s <= 14400 ? "D" : s <= 86400 ? "W" : "M"
+    keyMode == "Same as CRT TF" ? tf : keyMode == "Fixed" ? keyFix : nxt
+
 // Runs ON THE HIGHER TIMEFRAME. The current HTF bar is the candidate sweep candle.
-// Returns [kind, dir, rangeHigh, rangeLow, invalidation, rangeTime, keyMask, keyPrice].
+// Returns [kind, dir, rangeHigh, rangeLow, invalidation, rangeTime].
 f_classify() =>
     int   kind = 0
     int   dir  = 0
@@ -440,19 +481,16 @@ f_classify() =>
             iv   := bull ? low : high
             tr   := time[1]
 
-    [km, kp] = f_keys(dir)
-    if reqKey and km == 0
-        kind := 0
-    [kind, dir, rh, rl, iv, tr, km, kp]
+    [kind, dir, rh, rl, iv, tr]
 
 // Classification of the last CLOSED HTF candle (non-repainting: [1] + lookahead_on).
 f_htf() =>
-    [k, d, rh, rl, iv, tr, km, kp] = f_classify()
-    [k[1], d[1], rh[1], rl[1], iv[1], tr[1], km[1], kp[1]]
+    [k, d, rh, rl, iv, tr] = f_classify()
+    [k[1], d[1], rh[1], rl[1], iv[1], tr[1]]
 
 // Last two CLOSED HTF candles, for the mini candles and the live check.
 f_pair() =>
-    [open[2], high[2], low[2], close[2], open[1], high[1], low[1], close[1]]
+    [open[2], high[2], low[2], close[2], open[1], high[1], low[1], close[1], time[1]]
 
 // ═════════════════════════════════════════════════════════════════════════════
 // CRT STATE
@@ -461,6 +499,7 @@ type Crt
     string tf
     string lbl
     string sty
+    string klbl            // key-level TF label
     int    kind    = 0
     int    dir     = 0
     float  crh
@@ -470,6 +509,7 @@ type Crt
     float  inval
     int    keyMask = 0
     float  keyPx
+    string pd      = ""    // "Disc" / "Prem" of the sweep inside the key-TF range
     bool   tp1Hit  = false
     bool   done    = false
     int    result  = 0     // 1 = TP2 reached, -1 = invalidated
@@ -504,7 +544,8 @@ method freeze(Crt s) =>
             l.set_x2(time)
 
 method keyText(Crt s) =>
-    s.keyMask > 0 ? "🔑 " + f_keyText(s.keyMask, s.dir) : ""
+    string k = s.keyMask > 0 ? "🔑 " + f_keyText(s.keyMask, s.dir) + " " + s.klbl : ""
+    s.dir == 0 ? "" : k + (s.pd != "" ? (k != "" ? " · " : "") + s.pd : "")
 
 method statusText(Crt s) =>
     string base = f_name(s.kind) + (s.dir == 1 ? " ▲" : " ▼")
@@ -554,7 +595,7 @@ method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int
         s.bT := label.new(time, s.tp1, "TP1 " + s.lbl + " (50%)", xloc.bar_time, yloc.price, color(na), label.style_label_left, dc, size.small)
     if showKey and km > 0 and not na(kp)
         s.lK := line.new(tr, kp, time, kp, xloc.bar_time, extend.right, keyCol, line.style_dotted, 1)
-        s.bK := label.new(time, kp, f_keyText(km, dir) + " 🔑 " + s.lbl, xloc.bar_time, yloc.price, color(na), label.style_label_left, keyCol, size.small)
+        s.bK := label.new(time, kp, f_keyText(km, dir) + " 🔑 " + s.klbl, xloc.bar_time, yloc.price, color(na), label.style_label_left, keyCol, size.small)
     // Two Candle (delivered): C2 already ran through the whole range
     if kind == K_2D
         s.tp1Hit := true
@@ -596,7 +637,10 @@ method moveLabels(Crt s, int x) =>
                 b.set_x(x)
 
 // One timeframe, one chart bar. `tf` is passed separately so it stays a simple string.
-f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float iv, int tr, int km, float kp) =>
+// k1/k2 = key store as of the last / previous closed key-TF bar, kClose = close time of that bar,
+// bh/bl = premium-discount range, sh/sl/sc/st = sweep candle high/low/close/open time.
+f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float iv, int tr,
+     KeyStore k1, KeyStore k2, int kClose, float bh, float bl, float sh, float sl, float sc, int st) =>
     bool newHtf = timeframe.change(tf)
     // live (still open) HTF candle, built from chart bars
     if newHtf or na(s.c3o)
@@ -611,9 +655,18 @@ f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float i
     bool nBull = false
     bool nBear = false
     if on and newHtf and kind != 0 and not na(rh)
-        s.start(kind, dir, rh, rl, iv, tr, km, kp)
-        nBull := dir == 1
-        nBear := dir == -1
+        // only key levels that existed BEFORE the sweep candle opened
+        KeyStore ks = not na(kClose) and kClose > st ? k2 : k1
+        [km, kp] = f_keyCheck(ks, dir, sh, sl, sc)
+        float eq    = (bh + bl) / 2
+        float tip   = dir == 1 ? sl : sh
+        bool  pdOk  = not useBias or na(eq) or (dir == 1 ? tip <= eq : tip >= eq)
+        bool  keyOk = not reqKey or km > 0
+        if pdOk and keyOk
+            s.start(kind, dir, rh, rl, iv, tr, km, kp)
+            s.pd  := na(eq) ? "" : tip < eq ? "Disc" : "Prem"
+            nBull := dir == 1
+            nBear := dir == -1
     [e1, e2, ei] = s.track()
     [nBull, nBear, e1, e2, ei]
 
@@ -640,21 +693,24 @@ bool on1 = tf1On and timeframe.in_seconds(tf1) >= chartSec
 bool on2 = tf2On and timeframe.in_seconds(tf2) >= chartSec
 bool on3 = tf3On and timeframe.in_seconds(tf3) >= chartSec
 
-[a_k, a_d, a_rh, a_rl, a_iv, a_tr, a_km, a_kp] = request.security(syminfo.tickerid, tf1, f_htf(), lookahead = barmerge.lookahead_on)
-[b_k, b_d, b_rh, b_rl, b_iv, b_tr, b_km, b_kp] = request.security(syminfo.tickerid, tf2, f_htf(), lookahead = barmerge.lookahead_on)
-[c_k, c_d, c_rh, c_rl, c_iv, c_tr, c_km, c_kp] = request.security(syminfo.tickerid, tf3, f_htf(), lookahead = barmerge.lookahead_on)
+[a_k, a_d, a_rh, a_rl, a_iv, a_tr] = request.security(syminfo.tickerid, tf1, f_htf(), lookahead = barmerge.lookahead_on)
+[b_k, b_d, b_rh, b_rl, b_iv, b_tr] = request.security(syminfo.tickerid, tf2, f_htf(), lookahead = barmerge.lookahead_on)
+[c_k, c_d, c_rh, c_rl, c_iv, c_tr] = request.security(syminfo.tickerid, tf3, f_htf(), lookahead = barmerge.lookahead_on)
 
-[a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2] = request.security(syminfo.tickerid, tf1, f_pair(), lookahead = barmerge.lookahead_on)
-[b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2] = request.security(syminfo.tickerid, tf2, f_pair(), lookahead = barmerge.lookahead_on)
-[c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2] = request.security(syminfo.tickerid, tf3, f_pair(), lookahead = barmerge.lookahead_on)
+[a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2, a_t2] = request.security(syminfo.tickerid, tf1, f_pair(), lookahead = barmerge.lookahead_on)
+[a_ks1, a_ks2, a_kct, a_bh, a_bl] = request.security(syminfo.tickerid, f_keyTF(tf1), f_keyTF_data(), lookahead = barmerge.lookahead_on)
+[b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2, b_t2] = request.security(syminfo.tickerid, tf2, f_pair(), lookahead = barmerge.lookahead_on)
+[b_ks1, b_ks2, b_kct, b_bh, b_bl] = request.security(syminfo.tickerid, f_keyTF(tf2), f_keyTF_data(), lookahead = barmerge.lookahead_on)
+[c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2, c_t2] = request.security(syminfo.tickerid, tf3, f_pair(), lookahead = barmerge.lookahead_on)
+[c_ks1, c_ks2, c_kct, c_bh, c_bl] = request.security(syminfo.tickerid, f_keyTF(tf3), f_keyTF_data(), lookahead = barmerge.lookahead_on)
 
-var Crt s1 = Crt.new(tf1, f_tfLabel(tf1), tf1Sty)
-var Crt s2 = Crt.new(tf2, f_tfLabel(tf2), tf2Sty)
-var Crt s3 = Crt.new(tf3, f_tfLabel(tf3), tf3Sty)
+var Crt s1 = Crt.new(tf1, f_tfLabel(tf1), tf1Sty, f_tfLabel(f_keyTF(tf1)))
+var Crt s2 = Crt.new(tf2, f_tfLabel(tf2), tf2Sty, f_tfLabel(f_keyTF(tf2)))
+var Crt s3 = Crt.new(tf3, f_tfLabel(tf3), tf3Sty, f_tfLabel(f_keyTF(tf3)))
 
-[n1u, n1d, e11, e12, e1i] = f_step(s1, tf1, on1, a_k, a_d, a_rh, a_rl, a_iv, a_tr, a_km, a_kp)
-[n2u, n2d, e21, e22, e2i] = f_step(s2, tf2, on2, b_k, b_d, b_rh, b_rl, b_iv, b_tr, b_km, b_kp)
-[n3u, n3d, e31, e32, e3i] = f_step(s3, tf3, on3, c_k, c_d, c_rh, c_rl, c_iv, c_tr, c_km, c_kp)
+[n1u, n1d, e11, e12, e1i] = f_step(s1, tf1, on1, a_k, a_d, a_rh, a_rl, a_iv, a_tr, a_ks1, a_ks2, a_kct, a_bh, a_bl, a_h2, a_l2, a_c2, a_t2)
+[n2u, n2d, e21, e22, e2i] = f_step(s2, tf2, on2, b_k, b_d, b_rh, b_rl, b_iv, b_tr, b_ks1, b_ks2, b_kct, b_bh, b_bl, b_h2, b_l2, b_c2, b_t2)
+[n3u, n3d, e31, e32, e3i] = f_step(s3, tf3, on3, c_k, c_d, c_rh, c_rl, c_iv, c_tr, c_ks1, c_ks2, c_kct, c_bh, c_bl, c_h2, c_l2, c_c2, c_t2)
 
 f_alert(s1, n1u, n1d, e11, e12, e1i)
 f_alert(s2, n2u, n2d, e21, e22, e2i)

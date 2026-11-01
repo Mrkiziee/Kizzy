@@ -24,7 +24,12 @@
 ถ้ามีหลายแบบเข้าเงื่อนไขพร้อมกัน จะเลือกตามลำดับนี้: Double Purge → Inside Bar → Two Candle → Classic
 
 ### Key Level 🔑 (Settings → Key Levels)
-ไส้ของแท่งที่กวาด (sweep) ต้องไปแตะ key level ที่เกิดขึ้นก่อนแท่งนั้น บน TF เดียวกับ CRT
+ไส้ของแท่งที่กวาด (sweep) ต้องไปแตะ key level ที่เกิดขึ้นก่อนแท่งนั้น
+
+**ดูจาก TF ใหญ่ลงมา (top-down แบบ Romeo):** key level มาจาก TF ที่ใหญ่กว่าแท่ง CRT
+- ค่าเริ่มต้นคือ One step higher: CRT ≤1H → key จาก 4H, CRT 4H → key จาก D, CRT D → key จาก W
+- เปลี่ยนเป็น Same as CRT TF หรือเลือก TF เองแบบ Fixed ได้
+- ค่าเริ่มต้นเปิด **Only CRTs that tap a key level** ไว้ CRT ที่ไม่แตะ key level จะไม่แสดง
 
 | Key | ความหมาย | เงื่อนไข |
 |---|---|---|
@@ -38,6 +43,12 @@
 - อินดิเคเตอร์จะลากเส้น key level ที่ถูกแตะด้วยเส้นประสีส้ม เช่น `OHP+FVG 🔑 4H`
 - Dashboard มีคอลัมน์ Key และข้อความ alert จะมี `Key: ...` ด้วย
 - เปิด **Only CRTs that tap a key level** ได้ ถ้าต้องการให้แสดงเฉพาะ CRT ที่แตะ key level
+
+### HTF Bias: Premium / Discount
+- ใช้กรอบ high/low ของแท่ง key-TF ที่ปิดแล้ว N แท่งล่าสุด (ค่าเริ่มต้นคือ 1 แท่ง เช่นกรอบของวันก่อนหน้า)
+- **Bull CRT** รับเฉพาะเมื่อไส้กวาดลงไปอยู่ในโซน **Discount** (ต่ำกว่า 50%)
+- **Bear CRT** รับเฉพาะเมื่อไส้กวาดขึ้นไปอยู่ในโซน **Premium** (สูงกว่า 50%)
+- Dashboard จะแสดง Disc หรือ Prem ในคอลัมน์ Key
 
 ### สิ่งที่แสดงบนกราฟ
 - เส้น CRH, CRL และ TP1 ของแต่ละไทม์เฟรม เลือกสไตล์เส้นแยกกันได้ (Solid / Dashed / Dotted)
