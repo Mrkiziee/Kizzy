@@ -79,7 +79,7 @@ bool kIFVG = input.bool(true, "IFVG – Inverse FVG", group = G_KEY)
 string keyMode = input.string("One step higher", "Key level TF", ["One step higher", "Same as CRT TF", "Fixed"], inline = "ktf", group = G_KEY,
      tooltip = "Romeo-style top-down: key levels come from a HIGHER timeframe than the CRT candle.\nOne step higher: ≤1H → 4H, 4H → D, D → W, W → M.\nFixed: use the TF on the right for every row.")
 string keyFix  = input.timeframe("D", "", inline = "ktf", group = G_KEY)
-bool reqKey = input.bool(true, "Only CRTs that tap a key level", group = G_KEY,
+bool reqKey = input.bool(false, "Only CRTs that tap a key level", group = G_KEY,
      tooltip = "Skip CRTs whose sweep wick did not tap any enabled key level of the key-level TF.")
 int  keyLen = input.int(3, "Swing length", minval = 1, maxval = 10, group = G_KEY,
      tooltip = "Bars on each side (on the key-level TF) that confirm a swing high/low for OHP/OLP, RB and OCL.")
@@ -87,12 +87,12 @@ int  keyMax = input.int(6, "Levels kept per type", minval = 1, maxval = 20, grou
 bool showKey = input.bool(true, "Draw tapped key level", group = G_KEY)
 
 const string G_BIA = "HTF Bias – Premium / Discount"
-bool useBias = input.bool(true, "Premium / Discount filter", group = G_BIA,
+bool useBias = input.bool(false, "Premium / Discount filter", group = G_BIA,
      tooltip = "Uses the range of the last N closed candles of the key-level TF.\nBull CRT: the sweep low must be in DISCOUNT (below 50%).\nBear CRT: the sweep high must be in PREMIUM (above 50%).")
 int  biasN   = input.int(1, "Range = last N key-TF candles", minval = 1, maxval = 20, group = G_BIA)
 
 const string G_TIM = "Time Filter (4H CRT)"
-bool   useTime   = input.bool(true, "4H: sweep candle must open at these NY hours", group = G_TIM,
+bool   useTime   = input.bool(false, "4H: sweep candle must open at these NY hours", group = G_TIM,
      tooltip = "Only applies to rows whose CRT TF is 4H. The sweep candle (C2) must open at one of these New York hours (Romeo's 1am / 5am / 9am 4H candles).")
 string timeHours = input.string("1,5,9", "NY hours (comma separated)", group = G_TIM)
 
@@ -638,6 +638,7 @@ type Crt
     label  bL
     label  bT
     label  bK
+    label  bM              // "Manipulation" under / over the sweep wick
     float  tbsLvl          // chart-TF swing level the body closed through
     int    tbsBar
     float  tbsExt          // extreme of the soup (stop)
@@ -654,6 +655,7 @@ method clearDraw(Crt s) =>
     label.delete(s.bL)
     label.delete(s.bT)
     label.delete(s.bK)
+    label.delete(s.bM)
 
 method freeze(Crt s) =>
     for l in array.from(s.lH, s.lL, s.lT, s.lK)
@@ -678,7 +680,7 @@ method statusText(Crt s) =>
         r := base + (s.tp1Hit ? " · TP1 ✓" : "") + (s.age > 0 ? " · +" + str.tostring(s.age) : "")
     r
 
-method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int km, float kp) =>
+method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int km, float kp, int st) =>
     if keepHist
         s.freeze()
     else
@@ -699,6 +701,7 @@ method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int
     s.multi   := false
     s.lK      := na
     s.bK      := na
+    s.bM      := label.new(st, iv, "Manipulation", xloc.bar_time, yloc.price, color(na), dir == 1 ? label.style_label_up : label.style_label_down, lvlCol, size.tiny)
     s.tbsLvl  := na
     s.entered := false
     s.inTrade := false
@@ -836,7 +839,7 @@ f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float i
         bool  keyOk = not reqKey or km > 0
         bool  timeOk = not useTime or timeframe.in_seconds(tf) != 14400 or f_hourOk(st)
         if pdOk and keyOk and timeOk
-            s.start(kind, dir, rh, rl, iv, tr, km, kp)
+            s.start(kind, dir, rh, rl, iv, tr, km, kp, st)
             s.pd  := na(eq) ? "" : tip < eq ? "Disc" : "Prem"
             nBull := dir == 1
             nBear := dir == -1
@@ -849,8 +852,10 @@ f_alert(Crt s, bool nBull, bool nBear, bool e1, bool e2, bool ei) =>
     string dr  = s.dir == 1 ? "BULL" : "BEAR"
     string ky  = s.keyMask > 0 ? " | Key: " + f_keyText(s.keyMask, s.dir) : ""
     if alNew and (nBull or nBear)
-        string extra = s.kind == K_2D ? " | range already delivered" : str.format(" | TP1 (50%): {0} | TP2: {1} | Invalid: {2}", f_px(s.tp1), f_px(s.tp2), f_px(s.inval))
-        alert(str.format("{0} | {1} CRT {2} {3}{4}{5}", sym, s.lbl, nm, nBull ? "BULL 🟢" : "BEAR 🔴", ky, extra), alert.freq_once_per_bar)
+        string head  = str.format("📢 Kizzy - CRT {0} {1} | {2}", s.lbl, nBull ? "BULL 🟢" : "BEAR 🔴", sym)
+        string body  = s.kind == K_2D ? "\n✅ Range already delivered" : str.format("\n⚖️ TP1 (50%): {0}\n🎯 TP2: {1}\n🛑 Invalid: {2}", f_px(s.tp1), f_px(s.tp2), f_px(s.inval))
+        string info  = "\n📐 " + nm + (s.keyMask > 0 ? " · 🔑 " + f_keyText(s.keyMask, s.dir) + " " + s.klbl : "")
+        alert(head + body + info, alert.freq_once_per_bar)
     if alTP1 and e1
         alert(str.format("{0} | {1} {2} CRT {3} | TP1 hit ✓ {4}", sym, s.lbl, nm, dr, f_px(s.tp1)), alert.freq_once_per_bar)
     if alTP2 and e2
@@ -1035,7 +1040,7 @@ f_row(int row, Crt s, bool enabled, bool on, string forming) =>
     color  sc = s.dir == 1 ? bullCol : s.dir == -1 ? bearCol : #B2B5BE
     if s.done
         sc := color.new(sc, 40)
-    string st = not enabled ? "OFF" : not on ? "TF < chart" : s.statusText()
+    string st = not enabled ? "OFF" : not on ? "use chart ≤ " + s.lbl : s.statusText()
     table.cell(dash, 0, row, s.lbl, text_color = color.white, text_size = ts, text_halign = text.align_left)
     table.cell(dash, 1, row, st, text_color = on ? sc : #787B86, text_size = ts, text_halign = text.align_left)
     table.cell(dash, 2, row, on ? s.keyText() : "", text_color = keyCol, text_size = ts, text_halign = text.align_left)

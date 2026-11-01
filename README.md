@@ -29,7 +29,7 @@
 **ดูจาก TF ใหญ่ลงมา (top-down แบบ Romeo):** key level มาจาก TF ที่ใหญ่กว่าแท่ง CRT
 - ค่าเริ่มต้นคือ One step higher: CRT ≤1H → key จาก 4H, CRT 4H → key จาก D, CRT D → key จาก W
 - เปลี่ยนเป็น Same as CRT TF หรือเลือก TF เองแบบ Fixed ได้
-- ค่าเริ่มต้นเปิด **Only CRTs that tap a key level** ไว้ CRT ที่ไม่แตะ key level จะไม่แสดง
+- ค่าเริ่มต้นปิด **Only CRTs that tap a key level** ไว้ (เหมือนในวิดีโอ: CRT เกิดได้ทุกชั่วโมง) ถ้าต้องการแบบ Romeo เต็มสูตร ให้เปิดตัวกรองนี้ + Premium/Discount + Time Filter
 
 | Key | ความหมาย | เงื่อนไข |
 |---|---|---|
