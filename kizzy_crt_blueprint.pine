@@ -33,7 +33,7 @@
 // Alerts: Create Alert → Condition "Kizzy CRT" → "Any alert() function call".
 
 //@version=6
-indicator("Kizzy – CRT Blueprint", shorttitle = "Kizzy CRT", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 100)
+indicator("Kizzy – CRT Blueprint", shorttitle = "Kizzy CRT", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ═════════════════════════════════════════════════════════════════════════════
 // INPUTS
@@ -236,12 +236,15 @@ f_push(array<float> a, float v) =>
     if a.size() > keyMax
         a.pop()
 
-f_pushZ(array<float> t, array<float> b, float top, float bot) =>
+// zone = parallel arrays top / bottom / creation time (close time of the bar that created it)
+f_pushZ(array<float> t, array<float> b, array<int> tm, float top, float bot, int born) =>
     t.unshift(top)
     b.unshift(bot)
+    tm.unshift(born)
     if t.size() > keyMax
         t.pop()
         b.pop()
+        tm.pop()
 
 // level purged by the wick (h / l), close (c) back on the other side
 f_lvlBear(array<float> lv, float h, float c) =>
@@ -260,21 +263,21 @@ f_lvlBull(array<float> lv, float l, float c) =>
             break
     r
 
-// wick taps the zone and closes back away from it
-f_zoneBear(array<float> t, array<float> b, float h, float c) =>
+// wick taps the zone and closes back away from it. Zones created after the sweep opened (st) are ignored.
+f_zoneBear(array<float> t, array<float> b, array<int> tm, float h, float c, int st) =>
     float r = na
     for [i, top] in t
         float bot = b.get(i)
-        if h >= bot and c < top
+        if tm.get(i) <= st and h >= bot and c < top
             r := bot
             break
     r
 
-f_zoneBull(array<float> t, array<float> b, float l, float c) =>
+f_zoneBull(array<float> t, array<float> b, array<int> tm, float l, float c, int st) =>
     float r = na
     for [i, top] in t
         float bot = b.get(i)
-        if l <= top and c > bot
+        if tm.get(i) <= st and l <= top and c > bot
             r := top
             break
     r
@@ -287,15 +290,16 @@ f_dropLvl(array<float> a, bool above) =>
             if (above and close > v) or (not above and close < v)
                 a.remove(i)
 
-f_dropZone(array<float> t, array<float> b, bool above) =>
+f_dropZone(array<float> t, array<float> b, array<int> tm, bool above) =>
     if t.size() > 0
         for i = t.size() - 1 to 0
             if (above and close > t.get(i)) or (not above and close < b.get(i))
                 t.remove(i)
                 b.remove(i)
+                tm.remove(i)
 
-// FVG closed through → moves to the inverse list
-f_invert(array<float> st, array<float> sb, array<float> dt, array<float> db, bool up) =>
+// FVG closed through → moves to the inverse list (born = now)
+f_invert(array<float> st, array<float> sb, array<int> stm, array<float> dt, array<float> db, array<int> dtm, bool up) =>
     if st.size() > 0
         for i = st.size() - 1 to 0
             float t = st.get(i)
@@ -303,7 +307,8 @@ f_invert(array<float> st, array<float> sb, array<float> dt, array<float> db, boo
             if (up and close > t) or (not up and close < b)
                 st.remove(i)
                 sb.remove(i)
-                f_pushZ(dt, db, t, b)
+                stm.remove(i)
+                f_pushZ(dt, db, dtm, t, b, time_close)
 
 f_mask(float v1, float v2, float v3, float v4, float v5, float v6) =>
     int   m   = 0
@@ -317,40 +322,50 @@ f_mask(float v1, float v2, float v3, float v4, float v5, float v6) =>
         bit *= 2
     [m, p]
 
-// All key levels of one timeframe.
+// All key levels of one timeframe (zones: top / bottom / birth time).
 type KeyStore
     array<float> pvH    // swing highs           (OHP)
     array<float> pvL    // swing lows            (OLP)
     array<float> ocH    // body swing highs      (OCL)
     array<float> ocL    // body swing lows       (OCL)
-    array<float> rbHT   // rejection block above: wick high
-    array<float> rbHB   //                        body top
-    array<float> rbLT   // rejection block below: body bottom
-    array<float> rbLB   //                        wick low
+    array<float> rbHT   // rejection block above
+    array<float> rbHB
+    array<int>   rbHM
+    array<float> rbLT   // rejection block below
+    array<float> rbLB
+    array<int>   rbLM
     array<float> obBT   // bullish OB (support)
     array<float> obBB
+    array<int>   obBM
     array<float> obST   // bearish OB (resistance)
     array<float> obSB
+    array<int>   obSM
     array<float> fvBT   // bullish FVG (support)
     array<float> fvBB
+    array<int>   fvBM
     array<float> fvST   // bearish FVG (resistance)
     array<float> fvSB
+    array<int>   fvSM
     array<float> ifBT   // inverse FVG acting as support
     array<float> ifBB
+    array<int>   ifBM
     array<float> ifST   // inverse FVG acting as resistance
     array<float> ifSB
+    array<int>   ifSM
 
 f_newStore() =>
-    KeyStore.new(array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
-         array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
-         array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
-         array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>())
+    KeyStore.new(array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(),
+         array.new<float>(), array.new<float>(), array.new<int>(), array.new<float>(), array.new<float>(), array.new<int>(),
+         array.new<float>(), array.new<float>(), array.new<int>(), array.new<float>(), array.new<float>(), array.new<int>(),
+         array.new<float>(), array.new<float>(), array.new<int>(), array.new<float>(), array.new<float>(), array.new<int>(),
+         array.new<float>(), array.new<float>(), array.new<int>(), array.new<float>(), array.new<float>(), array.new<int>())
 
 method snapshot(KeyStore k) =>
-    KeyStore.new(k.pvH.copy(), k.pvL.copy(), k.ocH.copy(), k.ocL.copy(), k.rbHT.copy(),
-         k.rbHB.copy(), k.rbLT.copy(), k.rbLB.copy(), k.obBT.copy(), k.obBB.copy(),
-         k.obST.copy(), k.obSB.copy(), k.fvBT.copy(), k.fvBB.copy(), k.fvST.copy(),
-         k.fvSB.copy(), k.ifBT.copy(), k.ifBB.copy(), k.ifST.copy(), k.ifSB.copy())
+    KeyStore.new(k.pvH.copy(), k.pvL.copy(), k.ocH.copy(), k.ocL.copy(),
+         k.rbHT.copy(), k.rbHB.copy(), k.rbHM.copy(), k.rbLT.copy(), k.rbLB.copy(), k.rbLM.copy(),
+         k.obBT.copy(), k.obBB.copy(), k.obBM.copy(), k.obST.copy(), k.obSB.copy(), k.obSM.copy(),
+         k.fvBT.copy(), k.fvBB.copy(), k.fvBM.copy(), k.fvST.copy(), k.fvSB.copy(), k.fvSM.copy(),
+         k.ifBT.copy(), k.ifBB.copy(), k.ifBM.copy(), k.ifST.copy(), k.ifSB.copy(), k.ifSM.copy())
 
 // Runs ON THE KEY-LEVEL TF: updates the store with the current bar.
 method update(KeyStore k) =>
@@ -358,62 +373,64 @@ method update(KeyStore k) =>
     float pl  = ta.pivotlow(low, keyLen, keyLen)
     float bph = ta.pivothigh(math.max(open, close), keyLen, keyLen)
     float bpl = ta.pivotlow(math.min(open, close), keyLen, keyLen)
+    int   tb  = time_close
 
     f_dropLvl(k.pvH, true)
     f_dropLvl(k.pvL, false)
     f_dropLvl(k.ocH, true)
     f_dropLvl(k.ocL, false)
-    f_dropZone(k.rbHT, k.rbHB, true)
-    f_dropZone(k.rbLT, k.rbLB, false)
-    f_dropZone(k.obST, k.obSB, true)
-    f_dropZone(k.obBT, k.obBB, false)
-    f_dropZone(k.ifST, k.ifSB, true)
-    f_dropZone(k.ifBT, k.ifBB, false)
-    f_invert(k.fvBT, k.fvBB, k.ifST, k.ifSB, false)   // bullish FVG closed below → resistance IFVG
-    f_invert(k.fvST, k.fvSB, k.ifBT, k.ifBB, true)    // bearish FVG closed above → support IFVG
+    f_dropZone(k.rbHT, k.rbHB, k.rbHM, true)
+    f_dropZone(k.rbLT, k.rbLB, k.rbLM, false)
+    f_dropZone(k.obST, k.obSB, k.obSM, true)
+    f_dropZone(k.obBT, k.obBB, k.obBM, false)
+    f_dropZone(k.ifST, k.ifSB, k.ifSM, true)
+    f_dropZone(k.ifBT, k.ifBB, k.ifBM, false)
+    f_invert(k.fvBT, k.fvBB, k.fvBM, k.ifST, k.ifSB, k.ifSM, false)   // bullish FVG closed below → resistance IFVG
+    f_invert(k.fvST, k.fvSB, k.fvSM, k.ifBT, k.ifBB, k.ifBM, true)    // bearish FVG closed above → support IFVG
 
     if not na(ph)
         f_push(k.pvH, ph)
-        f_pushZ(k.rbHT, k.rbHB, ph, math.max(open[keyLen], close[keyLen]))
+        f_pushZ(k.rbHT, k.rbHB, k.rbHM, ph, math.max(open[keyLen], close[keyLen]), tb)
     if not na(pl)
         f_push(k.pvL, pl)
-        f_pushZ(k.rbLT, k.rbLB, math.min(open[keyLen], close[keyLen]), pl)
+        f_pushZ(k.rbLT, k.rbLB, k.rbLM, math.min(open[keyLen], close[keyLen]), pl, tb)
     if not na(bph)
         f_push(k.ocH, bph)
     if not na(bpl)
         f_push(k.ocL, bpl)
     if low > high[2]
-        f_pushZ(k.fvBT, k.fvBB, low, high[2])
+        f_pushZ(k.fvBT, k.fvBB, k.fvBM, low, high[2], tb)
     if high < low[2]
-        f_pushZ(k.fvST, k.fvSB, low[2], high)
+        f_pushZ(k.fvST, k.fvSB, k.fvSM, low[2], high, tb)
     if close[1] < open[1] and close > high[1]
-        f_pushZ(k.obBT, k.obBB, high[1], low[1])
+        f_pushZ(k.obBT, k.obBB, k.obBM, high[1], low[1], tb)
     if close[1] > open[1] and close < low[1]
-        f_pushZ(k.obST, k.obSB, high[1], low[1])
+        f_pushZ(k.obST, k.obSB, k.obSM, high[1], low[1], tb)
 
-// request.security payload: the store as of the last closed key-TF bar ([1]) and the one before ([2]),
-// the close time of the last closed key-TF bar, and the premium/discount range of the last N closed bars.
+// request.security payload (lookahead_on, no history of objects → low memory):
+// the store is copied BEFORE this bar updates it, so it only holds CLOSED key-TF bars.
+// Also returns the premium/discount range of the last N closed key-TF bars.
 f_keyTF_data() =>
     var KeyStore ks = f_newStore()
-    ks.update()
     KeyStore snap = ks.snapshot()
-    [snap[1], snap[2], time_close[1], ta.highest(high, biasN)[1], ta.lowest(low, biasN)[1]]
+    ks.update()
+    [snap, ta.highest(high, biasN)[1], ta.lowest(low, biasN)[1]]
 
-// Tests a sweep candle (h, l, c) against a key store. Returns [bitMask, firstLevelPrice].
-f_keyCheck(KeyStore k, int dir, float h, float l, float c) =>
+// Tests a sweep candle (h, l, c, open time st) against a key store. Returns [bitMask, firstLevelPrice].
+f_keyCheck(KeyStore k, int dir, float h, float l, float c, int st) =>
     int   mask = 0
     float px   = na
     if not na(k)
         if dir == -1
-            [m, p] = f_mask(kOX ? f_lvlBear(k.pvH, h, c) : na, kRB ? f_zoneBear(k.rbHT, k.rbHB, h, c) : na,
-                 kOB ? f_zoneBear(k.obST, k.obSB, h, c) : na, kFVG ? f_zoneBear(k.fvST, k.fvSB, h, c) : na,
-                 kOCL ? f_lvlBear(k.ocH, h, c) : na, kIFVG ? f_zoneBear(k.ifST, k.ifSB, h, c) : na)
+            [m, p] = f_mask(kOX ? f_lvlBear(k.pvH, h, c) : na, kRB ? f_zoneBear(k.rbHT, k.rbHB, k.rbHM, h, c, st) : na,
+                 kOB ? f_zoneBear(k.obST, k.obSB, k.obSM, h, c, st) : na, kFVG ? f_zoneBear(k.fvST, k.fvSB, k.fvSM, h, c, st) : na,
+                 kOCL ? f_lvlBear(k.ocH, h, c) : na, kIFVG ? f_zoneBear(k.ifST, k.ifSB, k.ifSM, h, c, st) : na)
             mask := m
             px   := p
         else if dir == 1
-            [m, p] = f_mask(kOX ? f_lvlBull(k.pvL, l, c) : na, kRB ? f_zoneBull(k.rbLT, k.rbLB, l, c) : na,
-                 kOB ? f_zoneBull(k.obBT, k.obBB, l, c) : na, kFVG ? f_zoneBull(k.fvBT, k.fvBB, l, c) : na,
-                 kOCL ? f_lvlBull(k.ocL, l, c) : na, kIFVG ? f_zoneBull(k.ifBT, k.ifBB, l, c) : na)
+            [m, p] = f_mask(kOX ? f_lvlBull(k.pvL, l, c) : na, kRB ? f_zoneBull(k.rbLT, k.rbLB, k.rbLM, l, c, st) : na,
+                 kOB ? f_zoneBull(k.obBT, k.obBB, k.obBM, l, c, st) : na, kFVG ? f_zoneBull(k.fvBT, k.fvBB, k.fvBM, l, c, st) : na,
+                 kOCL ? f_lvlBull(k.ocL, l, c) : na, kIFVG ? f_zoneBull(k.ifBT, k.ifBB, k.ifBM, l, c, st) : na)
             mask := m
             px   := p
     [mask, px]
@@ -720,10 +737,10 @@ f_hourOk(int t) =>
             ok := true
     ok
 
-// k1/k2 = key store as of the last / previous closed key-TF bar, kClose = close time of that bar,
+// ks = key store of CLOSED key-TF bars,
 // bh/bl = premium-discount range, sh/sl/sc/st = sweep candle high/low/close/open time.
 f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float iv, int tr,
-     KeyStore k1, KeyStore k2, int kClose, float bh, float bl, float sh, float sl, float sc, int st) =>
+     KeyStore ks, float bh, float bl, float sh, float sl, float sc, int st) =>
     bool newHtf = timeframe.change(tf)
     // live (still open) HTF candle, built from chart bars
     if newHtf or na(s.c3o)
@@ -739,8 +756,7 @@ f_step(Crt s, string tf, bool on, int kind, int dir, float rh, float rl, float i
     bool nBear = false
     if on and newHtf and kind != 0 and not na(rh)
         // only key levels that existed BEFORE the sweep candle opened
-        KeyStore ks = not na(kClose) and kClose > st ? k2 : k1
-        [km, kp] = f_keyCheck(ks, dir, sh, sl, sc)
+        [km, kp] = f_keyCheck(ks, dir, sh, sl, sc, st)
         float eq    = (bh + bl) / 2
         float tip   = dir == 1 ? sl : sh
         bool  pdOk  = not useBias or na(eq) or (dir == 1 ? tip <= eq : tip >= eq)
@@ -777,24 +793,24 @@ bool on1 = tf1On and timeframe.in_seconds(tf1) >= chartSec
 bool on2 = tf2On and timeframe.in_seconds(tf2) >= chartSec
 bool on3 = tf3On and timeframe.in_seconds(tf3) >= chartSec
 
-[a_k, a_d, a_rh, a_rl, a_iv, a_tr] = request.security(syminfo.tickerid, tf1, f_htf(), lookahead = barmerge.lookahead_on)
-[b_k, b_d, b_rh, b_rl, b_iv, b_tr] = request.security(syminfo.tickerid, tf2, f_htf(), lookahead = barmerge.lookahead_on)
-[c_k, c_d, c_rh, c_rl, c_iv, c_tr] = request.security(syminfo.tickerid, tf3, f_htf(), lookahead = barmerge.lookahead_on)
+[a_k, a_d, a_rh, a_rl, a_iv, a_tr] = request.security(syminfo.tickerid, on1 ? tf1 : timeframe.period, f_htf(), lookahead = barmerge.lookahead_on)
+[b_k, b_d, b_rh, b_rl, b_iv, b_tr] = request.security(syminfo.tickerid, on2 ? tf2 : timeframe.period, f_htf(), lookahead = barmerge.lookahead_on)
+[c_k, c_d, c_rh, c_rl, c_iv, c_tr] = request.security(syminfo.tickerid, on3 ? tf3 : timeframe.period, f_htf(), lookahead = barmerge.lookahead_on)
 
-[a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2, a_t2] = request.security(syminfo.tickerid, tf1, f_pair(), lookahead = barmerge.lookahead_on)
-[a_ks1, a_ks2, a_kct, a_bh, a_bl] = request.security(syminfo.tickerid, f_keyTF(tf1), f_keyTF_data(), lookahead = barmerge.lookahead_on)
-[b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2, b_t2] = request.security(syminfo.tickerid, tf2, f_pair(), lookahead = barmerge.lookahead_on)
-[b_ks1, b_ks2, b_kct, b_bh, b_bl] = request.security(syminfo.tickerid, f_keyTF(tf2), f_keyTF_data(), lookahead = barmerge.lookahead_on)
-[c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2, c_t2] = request.security(syminfo.tickerid, tf3, f_pair(), lookahead = barmerge.lookahead_on)
-[c_ks1, c_ks2, c_kct, c_bh, c_bl] = request.security(syminfo.tickerid, f_keyTF(tf3), f_keyTF_data(), lookahead = barmerge.lookahead_on)
+[a_o1, a_h1, a_l1, a_c1, a_o2, a_h2, a_l2, a_c2, a_t2] = request.security(syminfo.tickerid, on1 ? tf1 : timeframe.period, f_pair(), lookahead = barmerge.lookahead_on)
+[a_ks, a_bh, a_bl] = request.security(syminfo.tickerid, on1 ? f_keyTF(tf1) : timeframe.period, f_keyTF_data(), lookahead = barmerge.lookahead_on)
+[b_o1, b_h1, b_l1, b_c1, b_o2, b_h2, b_l2, b_c2, b_t2] = request.security(syminfo.tickerid, on2 ? tf2 : timeframe.period, f_pair(), lookahead = barmerge.lookahead_on)
+[b_ks, b_bh, b_bl] = request.security(syminfo.tickerid, on2 ? f_keyTF(tf2) : timeframe.period, f_keyTF_data(), lookahead = barmerge.lookahead_on)
+[c_o1, c_h1, c_l1, c_c1, c_o2, c_h2, c_l2, c_c2, c_t2] = request.security(syminfo.tickerid, on3 ? tf3 : timeframe.period, f_pair(), lookahead = barmerge.lookahead_on)
+[c_ks, c_bh, c_bl] = request.security(syminfo.tickerid, on3 ? f_keyTF(tf3) : timeframe.period, f_keyTF_data(), lookahead = barmerge.lookahead_on)
 
 var Crt s1 = Crt.new(tf1, f_tfLabel(tf1), tf1Sty, f_tfLabel(f_keyTF(tf1)))
 var Crt s2 = Crt.new(tf2, f_tfLabel(tf2), tf2Sty, f_tfLabel(f_keyTF(tf2)))
 var Crt s3 = Crt.new(tf3, f_tfLabel(tf3), tf3Sty, f_tfLabel(f_keyTF(tf3)))
 
-[n1u, n1d, e11, e12, e1i] = f_step(s1, tf1, on1, a_k, a_d, a_rh, a_rl, a_iv, a_tr, a_ks1, a_ks2, a_kct, a_bh, a_bl, a_h2, a_l2, a_c2, a_t2)
-[n2u, n2d, e21, e22, e2i] = f_step(s2, tf2, on2, b_k, b_d, b_rh, b_rl, b_iv, b_tr, b_ks1, b_ks2, b_kct, b_bh, b_bl, b_h2, b_l2, b_c2, b_t2)
-[n3u, n3d, e31, e32, e3i] = f_step(s3, tf3, on3, c_k, c_d, c_rh, c_rl, c_iv, c_tr, c_ks1, c_ks2, c_kct, c_bh, c_bl, c_h2, c_l2, c_c2, c_t2)
+[n1u, n1d, e11, e12, e1i] = f_step(s1, tf1, on1, a_k, a_d, a_rh, a_rl, a_iv, a_tr, a_ks, a_bh, a_bl, a_h2, a_l2, a_c2, a_t2)
+[n2u, n2d, e21, e22, e2i] = f_step(s2, tf2, on2, b_k, b_d, b_rh, b_rl, b_iv, b_tr, b_ks, b_bh, b_bl, b_h2, b_l2, b_c2, b_t2)
+[n3u, n3d, e31, e32, e3i] = f_step(s3, tf3, on3, c_k, c_d, c_rh, c_rl, c_iv, c_tr, c_ks, c_bh, c_bl, c_h2, c_l2, c_c2, c_t2)
 
 f_alert(s1, n1u, n1d, e11, e12, e1i)
 f_alert(s2, n2u, n2d, e21, e22, e2i)
