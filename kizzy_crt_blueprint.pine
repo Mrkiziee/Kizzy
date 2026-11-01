@@ -680,7 +680,7 @@ method statusText(Crt s) =>
         r := base + (s.tp1Hit ? " · TP1 ✓" : "") + (s.age > 0 ? " · +" + str.tostring(s.age) : "")
     r
 
-method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int km, float kp, int st) =>
+method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int km, float kp, int sweepT) =>
     if keepHist
         s.freeze()
     else
@@ -701,7 +701,7 @@ method start(Crt s, int kind, int dir, float rh, float rl, float iv, int tr, int
     s.multi   := false
     s.lK      := na
     s.bK      := na
-    s.bM      := label.new(st, iv, "Manipulation", xloc.bar_time, yloc.price, color(na), dir == 1 ? label.style_label_up : label.style_label_down, lvlCol, size.tiny)
+    s.bM      := label.new(sweepT, iv, "Manipulation", xloc.bar_time, yloc.price, color(na), dir == 1 ? label.style_label_up : label.style_label_down, lvlCol, size.tiny)
     s.tbsLvl  := na
     s.entered := false
     s.inTrade := false
